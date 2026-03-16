@@ -25,6 +25,9 @@ pub enum GraphError {
     RepositoryMismatch {
         entity: &'static str,
     },
+    ManagedRelationship {
+        kind: &'static str,
+    },
     InvalidParent {
         child: &'static str,
         expected: String,
@@ -55,6 +58,9 @@ impl Display for GraphError {
             }
             Self::RepositoryMismatch { entity } => {
                 write!(f, "{entity} belongs to a different repository")
+            }
+            Self::ManagedRelationship { kind } => {
+                write!(f, "`{kind}` relationships are derived from graph structure")
             }
             Self::InvalidParent {
                 child,
