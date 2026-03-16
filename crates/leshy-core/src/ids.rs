@@ -2,9 +2,13 @@ use std::fmt::{Display, Formatter};
 
 use crate::path::RelativePath;
 
+/// FNV-1a 64-bit offset basis used as the deterministic hash seed for stable IDs.
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+/// FNV-1a 64-bit prime used for each byte-mixing step in stable ID hashing.
 const FNV_PRIME: u64 = 0x100000001b3;
 
+/// Defines a strongly typed ID newtype with a stable text prefix, `Display` formatting,
+/// and helpers used by deterministic graph hashing.
 macro_rules! typed_id {
     ($name:ident, $label:literal) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
