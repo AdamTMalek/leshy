@@ -411,6 +411,15 @@ impl RepositoryGraph {
 
     /// Inserts an explicit relationship edge after validating its endpoints.
     pub fn insert_relationship(&mut self, relationship: Relationship) -> Result<(), GraphError> {
+        if matches!(
+            relationship.kind,
+            RelationshipKind::Contains | RelationshipKind::Defines
+        ) {
+            return Err(GraphError::ManagedRelationship {
+                kind: relationship.kind.as_str(),
+            });
+        }
+
         self.insert_relationship_internal(relationship)
     }
 
