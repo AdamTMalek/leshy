@@ -1,0 +1,6 @@
+[workspace]
+resolver = "3"
+members =[
+    "crates/leshy-cli",
+    "crates/leshy-core",
+]
