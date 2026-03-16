@@ -17,8 +17,15 @@ impl RelativePath {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, GraphError> {
         let raw = path.as_ref();
         let raw_display = raw.display().to_string();
+        let raw_string = raw
+            .to_str()
+            .ok_or_else(|| GraphError::InvalidRelativePath {
+                path: raw_display.clone(),
+                reason: "path must be valid UTF-8",
+            })?;
+        let normalized_input = raw_string.replace('\\', "/");
 
-        if raw.is_absolute() {
+        if raw.is_absolute() || looks_like_absolute_path(&normalized_input) {
             return Err(GraphError::InvalidRelativePath {
                 path: raw_display,
                 reason: "path must be relative to the repository root",
@@ -27,31 +34,16 @@ impl RelativePath {
 
         let mut segments = Vec::new();
 
-        for component in raw.components() {
-            match component {
-                std::path::Component::CurDir => {}
-                std::path::Component::Normal(segment) => {
-                    let segment =
-                        segment
-                            .to_str()
-                            .ok_or_else(|| GraphError::InvalidRelativePath {
-                                path: raw_display.clone(),
-                                reason: "path must be valid UTF-8",
-                            })?;
-                    segments.push(segment);
-                }
-                std::path::Component::ParentDir => {
+        for segment in normalized_input.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
                     return Err(GraphError::InvalidRelativePath {
                         path: raw_display,
                         reason: "path must not escape the repository root",
                     });
                 }
-                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                    return Err(GraphError::InvalidRelativePath {
-                        path: raw_display,
-                        reason: "path must be relative to the repository root",
-                    });
-                }
+                _ => segments.push(segment),
             }
         }
 
@@ -107,6 +99,16 @@ impl TryFrom<&Path> for RelativePath {
     }
 }
 
+fn looks_like_absolute_path(path: &str) -> bool {
+    path.starts_with('/') || has_windows_drive_prefix(path)
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
 #[cfg(test)]
 mod tests {
     use super::RelativePath;
@@ -125,12 +127,28 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_backslashes_to_forward_slashes() {
+        let path = RelativePath::new(r"src\graph\mod.rs").expect("path should normalize");
+        assert_eq!(path.as_str(), "src/graph/mod.rs");
+    }
+
+    #[test]
     fn rejects_parent_traversal() {
         let error = RelativePath::new("../Cargo.toml").expect_err("parent traversal must fail");
         assert!(
             error
                 .to_string()
                 .contains("path must not escape the repository root")
+        );
+    }
+
+    #[test]
+    fn rejects_windows_absolute_paths() {
+        let error = RelativePath::new(r"C:\repo\src\lib.rs").expect_err("absolute path must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("path must be relative to the repository root")
         );
     }
 }
