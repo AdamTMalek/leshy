@@ -659,6 +659,18 @@ mod tests {
     }
 
     #[test]
+    fn file_ids_are_stable_across_separator_styles() {
+        let repository_id = RepositoryId::new("repository");
+        let slash_path = RelativePath::new("src/lib.rs").expect("path should normalize");
+        let backslash_path = RelativePath::new(r"src\lib.rs").expect("path should normalize");
+
+        let left = FileId::new(repository_id, &slash_path);
+        let right = FileId::new(repository_id, &backslash_path);
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
     fn symbol_ids_change_when_stable_key_changes() {
         let repository_id = RepositoryId::new("repository");
         let file_id = FileId::new(
