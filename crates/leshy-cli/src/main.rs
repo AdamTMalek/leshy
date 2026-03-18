@@ -57,7 +57,9 @@ mod tests {
 
     #[test]
     fn rejects_non_existent_path() {
-        let error = validate_project_dir("missing-path").expect_err("missing path must fail");
+        let missing_path = unique_temp_path("missing");
+        let error = validate_project_dir(&missing_path.to_string_lossy())
+            .expect_err("missing path must fail");
 
         assert_eq!(error, "Path does not exist");
     }
@@ -116,5 +118,16 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "leshy-cli-test-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos()
+        ))
     }
 }
