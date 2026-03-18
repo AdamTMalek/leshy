@@ -17,11 +17,14 @@ fn index_command_succeeds_for_valid_directory() {
     let tempdir = TestDir::new();
     tempdir.write_file("src/lib.rs", "");
 
-    Command::new(binary_path())
+    let output = Command::new(binary_path())
         .arg("index")
         .arg(tempdir.path())
-        .assert_success()
-        .stdout_contains("Indexed repository:");
+        .assert_success();
+
+    output.stdout_contains("Indexed repository:");
+    output.stdout_contains("Directories: 2");
+    output.stdout_contains("Files: 1");
 }
 
 #[test]
@@ -138,19 +141,23 @@ impl CommandAssertionExt for Command {
 struct CommandOutput(std::process::Output);
 
 impl CommandOutput {
-    fn stdout_contains(self, needle: &str) {
+    fn stdout_contains(&self, needle: &str) -> &Self {
         let stdout = String::from_utf8_lossy(&self.0.stdout);
         assert!(
             stdout.contains(needle),
             "expected stdout to contain {needle:?}, got:\n{stdout}"
         );
+
+        self
     }
 
-    fn stderr_contains(self, needle: &str) {
+    fn stderr_contains(&self, needle: &str) -> &Self {
         let stderr = String::from_utf8_lossy(&self.0.stderr);
         assert!(
             stderr.contains(needle),
             "expected stderr to contain {needle:?}, got:\n{stderr}"
         );
+
+        self
     }
 }
