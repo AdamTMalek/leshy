@@ -1,7 +1,10 @@
 use std::cmp::Ordering;
-use std::fs::{self, DirEntry};
+use std::ffi::OsStr;
+use std::fs::{self};
 use std::io;
 use std::path::{Path, PathBuf};
+
+use ignore::WalkBuilder;
 
 use crate::{Directory, DirectoryId, File, GraphError, RelativePath, Repository};
 
@@ -56,6 +59,10 @@ pub enum ScanError {
         path: PathBuf,
         root: PathBuf,
     },
+    Walk {
+        path: PathBuf,
+        source: ignore::Error,
+    },
 }
 
 impl std::fmt::Display for ScanError {
@@ -78,6 +85,9 @@ impl std::fmt::Display for ScanError {
                     root.display()
                 )
             }
+            Self::Walk { path, .. } => {
+                write!(f, "failed to walk repository entry `{}`", path.display())
+            }
         }
     }
 }
@@ -87,6 +97,7 @@ impl std::error::Error for ScanError {
         match self {
             Self::ReadPath { source, .. } => Some(source),
             Self::RepositoryMetadata { source } => Some(source),
+            Self::Walk { source, .. } => Some(source),
             Self::RootNotDirectory { .. } | Self::PathOutsideRoot { .. } => None,
         }
     }
@@ -132,12 +143,8 @@ pub fn scan_repository(root: &Path) -> Result<RepositoryScan, ScanError> {
         skipped: Vec::new(),
     };
 
-    walk_directory(
-        &canonical_root,
-        &canonical_root,
-        root_directory_id,
-        &mut scan,
-    )?;
+    record_git_directory_skip(&canonical_root, &mut scan)?;
+    walk_repository(&canonical_root, root_directory_id, &mut scan)?;
 
     scan.directories.sort_by(compare_directories);
     scan.files.sort_by(|left, right| {
@@ -151,24 +158,44 @@ pub fn scan_repository(root: &Path) -> Result<RepositoryScan, ScanError> {
     Ok(scan)
 }
 
-fn walk_directory(
+fn walk_repository(
     repository_root: &Path,
-    current_directory: &Path,
-    parent_id: DirectoryId,
+    root_directory_id: DirectoryId,
     scan: &mut RepositoryScan,
 ) -> Result<(), ScanError> {
-    let mut entries = read_dir_entries(current_directory)?;
-    entries.sort_by(compare_entries);
+    let mut builder = WalkBuilder::new(repository_root);
+    builder
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .require_git(true)
+        .follow_links(false)
+        .sort_by_file_name(compare_entry_names)
+        .filter_entry(|entry| entry.file_name() != OsStr::new(".git"));
 
-    for entry in entries {
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| ScanError::ReadPath {
-            action: "read filesystem entry type",
-            path: path.clone(),
+    for entry in builder.build() {
+        let entry = entry.map_err(|source| ScanError::Walk {
+            path: repository_root.to_path_buf(),
             source,
         })?;
 
-        if file_type.is_symlink() {
+        if let Some(source) = entry.error().cloned() {
+            return Err(ScanError::Walk {
+                path: entry.path().to_path_buf(),
+                source,
+            });
+        }
+
+        if entry.depth() == 0 {
+            continue;
+        }
+
+        let path = entry.path().to_path_buf();
+
+        if entry.path_is_symlink() {
             scan.skipped.push(SkippedPath {
                 path,
                 reason: SkippedPathReason::Symlink,
@@ -182,25 +209,23 @@ fn walk_directory(
             continue;
         };
 
-        if file_type.is_dir() && entry.file_name() == ".git" {
-            scan.skipped.push(SkippedPath {
-                path,
-                reason: SkippedPathReason::IgnoredGitDirectory,
-            });
+        let Some(file_type) = entry.file_type() else {
             continue;
-        }
+        };
 
         if file_type.is_dir() {
+            let parent_id =
+                parent_directory_id(scan.repository.id, &relative_path, root_directory_id);
             let directory =
                 Directory::new(scan.repository.id, Some(parent_id), relative_path.as_str())
                     .map_err(|source| ScanError::RepositoryMetadata { source })?;
-            let directory_id = directory.id;
             scan.directories.push(directory);
-            walk_directory(repository_root, &path, directory_id, scan)?;
             continue;
         }
 
         if file_type.is_file() {
+            let parent_id =
+                parent_directory_id(scan.repository.id, &relative_path, root_directory_id);
             let file = File::new(scan.repository.id, parent_id, relative_path.as_str())
                 .map_err(|source| ScanError::RepositoryMetadata { source })?;
             scan.files.push(file);
@@ -214,6 +239,45 @@ fn walk_directory(
     }
 
     Ok(())
+}
+
+fn record_git_directory_skip(
+    repository_root: &Path,
+    scan: &mut RepositoryScan,
+) -> Result<(), ScanError> {
+    let git_directory = repository_root.join(".git");
+    let metadata = match fs::metadata(&git_directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(ScanError::ReadPath {
+                action: "read git metadata",
+                path: git_directory,
+                source,
+            });
+        }
+    };
+
+    if metadata.is_dir() {
+        scan.skipped.push(SkippedPath {
+            path: git_directory,
+            reason: SkippedPathReason::IgnoredGitDirectory,
+        });
+    }
+
+    Ok(())
+}
+
+fn parent_directory_id(
+    repository_id: crate::RepositoryId,
+    relative_path: &RelativePath,
+    root_directory_id: DirectoryId,
+) -> DirectoryId {
+    match relative_path.parent() {
+        Some(parent) if parent.is_root() => root_directory_id,
+        Some(parent) => DirectoryId::new(repository_id, &parent),
+        None => root_directory_id,
+    }
 }
 
 fn normalize_relative_path(
@@ -451,25 +515,8 @@ fn normalize_host_and_path(host: &str, path: &str) -> Option<String> {
     Some(format!("{}/{}", host.to_ascii_lowercase(), path))
 }
 
-fn read_dir_entries(path: &Path) -> Result<Vec<DirEntry>, ScanError> {
-    fs::read_dir(path)
-        .map_err(|source| ScanError::ReadPath {
-            action: "read directory",
-            path: path.to_path_buf(),
-            source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| ScanError::ReadPath {
-            action: "read directory entry",
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-fn compare_entries(left: &DirEntry, right: &DirEntry) -> Ordering {
-    left.file_name()
-        .to_string_lossy()
-        .cmp(&right.file_name().to_string_lossy())
+fn compare_entry_names(left: &OsStr, right: &OsStr) -> Ordering {
+    left.to_string_lossy().cmp(&right.to_string_lossy())
 }
 
 fn compare_directories(left: &Directory, right: &Directory) -> Ordering {
@@ -566,6 +613,66 @@ mod tests {
             SkippedPathReason::IgnoredGitDirectory
         );
         assert!(scan.skipped[0].path.ends_with(".git"));
+    }
+
+    #[test]
+    fn honors_gitignore_rules_during_repository_walks() {
+        let tempdir = TestDir::new();
+        tempdir.write_git_config(
+            r#"[remote "origin"]
+    url = https://github.com/AdamTMalek/leshy.git
+"#,
+        );
+        tempdir.write_file(".gitignore", "target/\n*.log\n");
+        tempdir.write_file("src/lib.rs", "");
+        tempdir.write_file("target/generated.rs", "");
+        tempdir.write_file("debug.log", "");
+
+        let scan = scan_repository(tempdir.path()).expect("scan should succeed");
+        let files = scan
+            .files
+            .iter()
+            .map(|file| file.relative_path.to_string())
+            .collect::<Vec<_>>();
+        let directories = scan
+            .directories
+            .iter()
+            .map(|directory| directory.relative_path.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(files, vec![".gitignore", "src/lib.rs"]);
+        assert_eq!(directories, vec![".", "src"]);
+    }
+
+    #[test]
+    fn keeps_hidden_files_when_not_gitignored() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(".env", "");
+
+        let scan = scan_repository(tempdir.path()).expect("scan should succeed");
+        let files = scan
+            .files
+            .iter()
+            .map(|file| file.relative_path.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(files, vec![".env"]);
+    }
+
+    #[test]
+    fn does_not_read_plain_ignore_files() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(".ignore", "ignored.rs\n");
+        tempdir.write_file("ignored.rs", "");
+
+        let scan = scan_repository(tempdir.path()).expect("scan should succeed");
+        let files = scan
+            .files
+            .iter()
+            .map(|file| file.relative_path.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(files, vec![".ignore", "ignored.rs"]);
     }
 
     #[test]

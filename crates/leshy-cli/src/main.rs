@@ -48,7 +48,7 @@ fn run(main_args: MainArgs) -> Result<String, CliError> {
 fn run_index(path: PathBuf) -> Result<String, CliError> {
     let index = index_repository(&path).map_err(|source| CliError::Index {
         path: path.clone(),
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(format_index_summary(&path, &index))
@@ -78,7 +78,7 @@ fn display_path(path: &std::path::Path) -> Cow<'_, str> {
 enum CliError {
     Index {
         path: PathBuf,
-        source: leshy_core::IndexError,
+        source: Box<leshy_core::IndexError>,
     },
 }
 

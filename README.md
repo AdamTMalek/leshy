@@ -133,6 +133,8 @@ Index a repository:
 leshy index .
 ```
 
+Repository scans honor Git ignore rules such as `.gitignore` and `.git/info/exclude`, while still indexing hidden files that are not ignored by Git.
+
 Query relationships:
 
 ```bash
