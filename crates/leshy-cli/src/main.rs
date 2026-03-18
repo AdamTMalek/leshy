@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use leshy_core::index_repository;
+use leshy_core::{RepositoryIndex, index_repository};
 use std::borrow::Cow;
 use std::fs::canonicalize;
 use std::path::PathBuf;
@@ -46,12 +46,21 @@ fn run(main_args: MainArgs) -> Result<String, CliError> {
 }
 
 fn run_index(path: PathBuf) -> Result<String, CliError> {
-    index_repository(&path).map_err(|source| CliError::Index {
+    let index = index_repository(&path).map_err(|source| CliError::Index {
         path: path.clone(),
         source,
     })?;
 
-    Ok(format!("Indexed repository: {}", display_path(&path)))
+    Ok(format_index_summary(&path, &index))
+}
+
+fn format_index_summary(path: &std::path::Path, index: &RepositoryIndex) -> String {
+    format!(
+        "Indexed repository: {}\nDirectories: {}\nFiles: {}",
+        display_path(path),
+        index.scan.directories.len(),
+        index.scan.files.len()
+    )
 }
 
 fn display_path(path: &std::path::Path) -> Cow<'_, str> {
@@ -112,7 +121,9 @@ mod tests {
 
     use clap::CommandFactory;
 
-    use super::{CliError, MainArgs, display_path, run_index, validate_project_dir};
+    use super::{
+        CliError, MainArgs, display_path, format_index_summary, run_index, validate_project_dir,
+    };
 
     #[test]
     fn rejects_non_existent_path() {
@@ -176,6 +187,21 @@ mod tests {
         assert!(matches!(error, CliError::Index { .. }));
     }
 
+    #[test]
+    fn formats_successful_index_summary() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "");
+        let validated =
+            validate_project_dir(&tempdir.path().to_string_lossy()).expect("valid directory");
+        let index = leshy_core::index_repository(&validated).expect("indexing should succeed");
+
+        let summary = format_index_summary(&validated, &index);
+
+        assert!(summary.contains(display_path(&validated).as_ref()));
+        assert!(summary.contains("Directories: 2"));
+        assert!(summary.contains("Files: 1"));
+    }
+
     struct TestDir {
         path: PathBuf,
     }
@@ -198,6 +224,14 @@ mod tests {
 
         fn path(&self) -> &Path {
             &self.path
+        }
+
+        fn write_file(&self, relative_path: &str, contents: &str) {
+            let file_path = self.path.join(relative_path);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent).expect("parent directories should be created");
+            }
+            fs::write(file_path, contents).expect("file should be written");
         }
     }
 
