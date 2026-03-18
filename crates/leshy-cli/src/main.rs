@@ -46,3 +46,75 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::validate_project_dir;
+
+    #[test]
+    fn rejects_non_existent_path() {
+        let error = validate_project_dir("missing-path").expect_err("missing path must fail");
+
+        assert_eq!(error, "Path does not exist");
+    }
+
+    #[test]
+    fn rejects_non_directory_path() {
+        let tempdir = TestDir::new();
+        let file_path = tempdir.path().join("file.txt");
+        fs::write(&file_path, "content").expect("temporary file");
+        let file_path = file_path.to_string_lossy().into_owned();
+
+        let error = validate_project_dir(&file_path).expect_err("file path must fail");
+
+        assert_eq!(error, "Path is not a directory");
+    }
+
+    #[test]
+    fn accepts_directory_and_returns_canonical_path() {
+        let tempdir = TestDir::new();
+        let nested = tempdir.path().join("repo");
+        fs::create_dir(&nested).expect("nested directory");
+        let relative = nested.to_string_lossy().into_owned();
+
+        let validated = validate_project_dir(&relative).expect("directory path should validate");
+
+        assert!(validated.is_absolute());
+        assert!(validated.ends_with("repo"));
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new() -> Self {
+            let unique = format!(
+                "leshy-cli-test-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time should be valid")
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            fs::create_dir(&path).expect("temporary directory should be created");
+
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
