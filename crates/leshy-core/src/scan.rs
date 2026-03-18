@@ -258,7 +258,9 @@ fn git_origin_url(root: &Path) -> Result<Option<String>, ScanError> {
         return Ok(None);
     };
 
-    let config_path = git_dir.join("config");
+    let Some(config_path) = resolve_git_config_path(&git_dir)? else {
+        return Ok(None);
+    };
     let config = fs::read_to_string(&config_path).map_err(|source| ScanError::ReadPath {
         action: "read git config",
         path: config_path.clone(),
@@ -318,6 +320,48 @@ fn parse_git_dir_reference(contents: &str) -> Option<PathBuf> {
         None
     } else {
         Some(PathBuf::from(git_dir))
+    }
+}
+
+fn resolve_git_config_path(git_dir: &Path) -> Result<Option<PathBuf>, ScanError> {
+    let local_config = git_dir.join("config");
+    if local_config.is_file() {
+        return Ok(Some(local_config));
+    }
+
+    // Git worktrees often point `.git` at a per-worktree directory without its own `config`.
+    // In that layout, `commondir` points back to the shared git dir that owns repository config.
+    let common_dir_path = git_dir.join("commondir");
+    let common_dir = match fs::read_to_string(&common_dir_path) {
+        Ok(contents) => parse_common_dir_reference(&contents).map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                git_dir.join(path)
+            }
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(ScanError::ReadPath {
+                action: "read git common dir",
+                path: common_dir_path,
+                source,
+            });
+        }
+    };
+
+    Ok(common_dir
+        .map(|path| path.join("config"))
+        .filter(|path| path.is_file()))
+}
+
+fn parse_common_dir_reference(contents: &str) -> Option<PathBuf> {
+    let common_dir = contents.lines().next()?.trim();
+
+    if common_dir.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(common_dir))
     }
 }
 
@@ -650,6 +694,24 @@ mod tests {
         let scan = scan_repository(tempdir.path()).expect("scan should succeed");
 
         assert_eq!(scan.identity_source, RepositoryIdentitySource::PathFallback);
+    }
+
+    #[test]
+    fn resolves_git_origin_from_worktree_common_dir() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(".git", "gitdir: .git-main/worktrees/current-worktree\n");
+        tempdir.write_file(".git-main/worktrees/current-worktree/commondir", "../..\n");
+        tempdir.write_file(
+            ".git-main/config",
+            r#"[remote "origin"]
+    url = https://github.com/AdamTMalek/leshy.git
+"#,
+        );
+
+        let scan = scan_repository(tempdir.path()).expect("scan should succeed");
+
+        assert_eq!(scan.identity_source, RepositoryIdentitySource::GitOrigin);
+        assert_eq!(scan.repository.stable_key, "github.com/AdamTMalek/leshy");
     }
 
     #[test]
