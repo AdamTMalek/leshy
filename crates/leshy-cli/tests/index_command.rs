@@ -28,6 +28,23 @@ fn index_command_succeeds_for_valid_directory() {
 }
 
 #[test]
+fn index_command_honors_gitignore_rules() {
+    let tempdir = TestDir::new();
+    tempdir.write_git_config("");
+    tempdir.write_file(".gitignore", "target/\n");
+    tempdir.write_file("src/lib.rs", "");
+    tempdir.write_file("target/generated.rs", "");
+
+    let output = Command::new(binary_path())
+        .arg("index")
+        .arg(tempdir.path())
+        .assert_success();
+
+    output.stdout_contains("Directories: 2");
+    output.stdout_contains("Files: 2");
+}
+
+#[test]
 fn index_command_rejects_missing_path() {
     let missing_path = unique_temp_path("missing");
 
@@ -81,6 +98,11 @@ impl TestDir {
             fs::create_dir_all(parent).expect("parent directories should be created");
         }
         fs::write(file_path, contents).expect("file should be written");
+    }
+
+    fn write_git_config(&self, contents: &str) {
+        fs::create_dir_all(self.path.join(".git")).expect("git directory should be created");
+        fs::write(self.path.join(".git/config"), contents).expect("git config should be written");
     }
 }
 
