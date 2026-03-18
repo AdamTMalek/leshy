@@ -353,11 +353,58 @@ fn parse_origin_url(config: &str) -> Option<String> {
 }
 
 fn normalize_git_origin(origin: &str) -> String {
-    origin
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .to_string()
+    let trimmed = trim_git_origin_suffixes(origin);
+
+    normalize_git_transport(trimmed).unwrap_or_else(|| trimmed.to_string())
+}
+
+fn trim_git_origin_suffixes(origin: &str) -> &str {
+    origin.trim().trim_end_matches('/').trim_end_matches(".git")
+}
+
+fn normalize_git_transport(origin: &str) -> Option<String> {
+    if let Some(rest) = origin.strip_prefix("git@") {
+        return normalize_scp_like_origin(rest);
+    }
+
+    if let Some(rest) = strip_supported_scheme(origin) {
+        return normalize_scheme_origin(rest);
+    }
+
+    None
+}
+
+fn strip_supported_scheme(origin: &str) -> Option<&str> {
+    ["ssh://", "https://", "http://"]
+        .into_iter()
+        .find_map(|scheme| origin.strip_prefix(scheme))
+}
+
+fn normalize_scp_like_origin(origin: &str) -> Option<String> {
+    let (host, path) = origin.split_once(':')?;
+
+    normalize_host_and_path(host, path)
+}
+
+fn normalize_scheme_origin(origin: &str) -> Option<String> {
+    let without_user = origin
+        .rsplit_once('@')
+        .map(|(_, rest)| rest)
+        .unwrap_or(origin);
+    let (host, path) = without_user.split_once('/')?;
+
+    normalize_host_and_path(host, path)
+}
+
+fn normalize_host_and_path(host: &str, path: &str) -> Option<String> {
+    let host = host.trim().trim_end_matches('/').trim_end_matches(':');
+    let path = path.trim().trim_matches('/');
+
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+
+    Some(format!("{}/{}", host.to_ascii_lowercase(), path))
 }
 
 fn read_dir_entries(path: &Path) -> Result<Vec<DirEntry>, ScanError> {
@@ -515,10 +562,7 @@ mod tests {
         let scan = scan_repository(tempdir.path()).expect("scan should succeed");
 
         assert_eq!(scan.identity_source, RepositoryIdentitySource::GitOrigin);
-        assert_eq!(
-            scan.repository.stable_key,
-            "https://github.com/AdamTMalek/leshy"
-        );
+        assert_eq!(scan.repository.stable_key, "github.com/AdamTMalek/leshy");
     }
 
     #[test]
@@ -552,6 +596,46 @@ mod tests {
         );
         assert_eq!(left_scan.repository.id, right_scan.repository.id);
         assert_eq!(left_scan.files[0].id, right_scan.files[0].id);
+    }
+
+    #[test]
+    fn normalizes_https_and_ssh_git_origins_to_the_same_identity() {
+        let https = TestDir::new();
+        let ssh = TestDir::new();
+        let ssh_scheme = TestDir::new();
+
+        https.write_git_config(
+            r#"[remote "origin"]
+    url = https://github.com/AdamTMalek/leshy.git
+"#,
+        );
+        ssh.write_git_config(
+            r#"[remote "origin"]
+    url = git@github.com:AdamTMalek/leshy.git
+"#,
+        );
+        ssh_scheme.write_git_config(
+            r#"[remote "origin"]
+    url = ssh://git@github.com/AdamTMalek/leshy.git
+"#,
+        );
+
+        let https_scan = scan_repository(https.path()).expect("https scan should succeed");
+        let ssh_scan = scan_repository(ssh.path()).expect("ssh scan should succeed");
+        let ssh_scheme_scan =
+            scan_repository(ssh_scheme.path()).expect("ssh scheme scan should succeed");
+
+        assert_eq!(https_scan.repository.stable_key, "github.com/AdamTMalek/leshy");
+        assert_eq!(
+            https_scan.repository.stable_key,
+            ssh_scan.repository.stable_key
+        );
+        assert_eq!(
+            https_scan.repository.stable_key,
+            ssh_scheme_scan.repository.stable_key
+        );
+        assert_eq!(https_scan.repository.id, ssh_scan.repository.id);
+        assert_eq!(https_scan.repository.id, ssh_scheme_scan.repository.id);
     }
 
     #[test]
