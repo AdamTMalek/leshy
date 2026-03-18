@@ -1,9 +1,12 @@
 use clap::{Args, Parser, Subcommand};
+use leshy_core::index_repository;
+use std::borrow::Cow;
 use std::fs::canonicalize;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(name = "leshy", bin_name = "leshy", version, about, long_about = None)]
 struct MainArgs {
     #[command(subcommand)]
     command: Commands,
@@ -17,10 +20,9 @@ enum Commands {
 
 #[derive(Args, Debug)]
 struct IndexArgs {
-    /// Path to the repository which will be indexed. The argument may be either a relative
-    /// or an absolute path.
-    #[arg(short, long, value_name = "PROJECT_DIR", value_parser = validate_project_dir)]
-    path: std::path::PathBuf,
+    /// Path to the repository which will be indexed. The argument may be either a relative or an absolute path.
+    #[arg(value_name = "PATH", value_parser = validate_project_dir)]
+    path: PathBuf,
 }
 
 fn validate_project_dir(string_path: &str) -> Result<PathBuf, String> {
@@ -37,12 +39,67 @@ fn validate_project_dir(string_path: &str) -> Result<PathBuf, String> {
     canonicalize(path).map_err(|err| format!("Invalid path: {err}"))
 }
 
-fn main() {
-    let main_args = MainArgs::parse();
+fn run(main_args: MainArgs) -> Result<String, CliError> {
+    match main_args.command {
+        Commands::Index(index_args) => run_index(index_args.path),
+    }
+}
 
-    match &main_args.command {
-        Commands::Index(index_args) => {
-            println!("{:#?}", index_args);
+fn run_index(path: PathBuf) -> Result<String, CliError> {
+    index_repository(&path).map_err(|source| CliError::Index {
+        path: path.clone(),
+        source,
+    })?;
+
+    Ok(format!("Indexed repository: {}", display_path(&path)))
+}
+
+fn display_path(path: &std::path::Path) -> Cow<'_, str> {
+    let path = path.to_string_lossy();
+
+    #[cfg(windows)]
+    if let Some(stripped) = path.strip_prefix(r"\\?\") {
+        return Cow::Owned(stripped.to_string());
+    }
+
+    path
+}
+
+#[derive(Debug)]
+enum CliError {
+    Index {
+        path: PathBuf,
+        source: leshy_core::IndexError,
+    },
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Index { path, source } => {
+                write!(f, "failed to index `{}`: {source}", display_path(path))
+            }
+        }
+    }
+}
+
+impl std::error::Error for CliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Index { source, .. } => Some(source),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    match run(MainArgs::parse()) {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -53,7 +110,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::validate_project_dir;
+    use clap::CommandFactory;
+
+    use super::{CliError, MainArgs, display_path, run_index, validate_project_dir};
 
     #[test]
     fn rejects_non_existent_path() {
@@ -87,6 +146,34 @@ mod tests {
 
         assert!(validated.is_absolute());
         assert!(validated.ends_with("repo"));
+    }
+
+    #[test]
+    fn help_uses_leshy_binary_name() {
+        let help = MainArgs::command().render_long_help().to_string();
+
+        assert!(help.contains("Usage: leshy <COMMAND>"));
+    }
+
+    #[test]
+    fn formats_runtime_index_failures_with_requested_action() {
+        let tempdir = TestDir::new();
+        let missing_after_validation = tempdir.path().join("repo");
+        fs::create_dir(&missing_after_validation).expect("directory should exist for validation");
+        let validated =
+            validate_project_dir(&missing_after_validation.to_string_lossy()).expect("valid path");
+        fs::remove_dir_all(&missing_after_validation).expect("directory should be removed");
+
+        let error = run_index(validated).expect_err("indexing should fail after directory removal");
+
+        let message = error.to_string();
+        let display_path = display_path(&missing_after_validation);
+
+        assert!(message.contains("failed to index"));
+        assert!(message.contains(display_path.as_ref()));
+        assert!(message.contains("failed to scan repository"));
+        assert!(message.contains("failed to canonicalize repository root"));
+        assert!(matches!(error, CliError::Index { .. }));
     }
 
     struct TestDir {
