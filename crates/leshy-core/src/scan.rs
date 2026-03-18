@@ -8,10 +8,18 @@ use crate::{Directory, DirectoryId, File, GraphError, RelativePath, Repository};
 /// A deterministic repository scan result that can be consumed by the indexing pipeline.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepositoryScan {
+    pub identity_source: RepositoryIdentitySource,
     pub repository: Repository,
     pub directories: Vec<Directory>,
     pub files: Vec<File>,
     pub skipped: Vec<SkippedPath>,
+}
+
+/// The source used to derive repository identity for stable IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepositoryIdentitySource {
+    GitOrigin,
+    PathFallback,
 }
 
 /// A skipped filesystem entry recorded during repository scanning.
@@ -104,11 +112,11 @@ pub fn scan_repository(root: &Path) -> Result<RepositoryScan, ScanError> {
         });
     }
 
-    let stable_key = canonical_root.to_string_lossy().into_owned();
+    let (stable_key, identity_source) = repository_identity(&canonical_root)?;
     let display_name = canonical_root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| stable_key.clone());
+        .unwrap_or_else(|| canonical_root.to_string_lossy().into_owned());
     let repository = Repository::new(stable_key, display_name, canonical_root.clone())
         .map_err(|source| ScanError::RepositoryMetadata { source })?;
 
@@ -117,6 +125,7 @@ pub fn scan_repository(root: &Path) -> Result<RepositoryScan, ScanError> {
     let root_directory_id = root_directory.id;
 
     let mut scan = RepositoryScan {
+        identity_source,
         repository,
         directories: vec![root_directory],
         files: Vec::new(),
@@ -231,6 +240,126 @@ fn normalize_relative_path(
     }
 }
 
+fn repository_identity(root: &Path) -> Result<(String, RepositoryIdentitySource), ScanError> {
+    match git_origin_url(root)? {
+        Some(origin) => Ok((
+            normalize_git_origin(&origin),
+            RepositoryIdentitySource::GitOrigin,
+        )),
+        None => Ok((
+            root.to_string_lossy().into_owned(),
+            RepositoryIdentitySource::PathFallback,
+        )),
+    }
+}
+
+fn git_origin_url(root: &Path) -> Result<Option<String>, ScanError> {
+    let Some(git_dir) = resolve_git_dir(root)? else {
+        return Ok(None);
+    };
+
+    let config_path = git_dir.join("config");
+    let config = fs::read_to_string(&config_path).map_err(|source| ScanError::ReadPath {
+        action: "read git config",
+        path: config_path.clone(),
+        source,
+    })?;
+
+    Ok(parse_origin_url(&config))
+}
+
+fn resolve_git_dir(root: &Path) -> Result<Option<PathBuf>, ScanError> {
+    let git_path = root.join(".git");
+    let metadata = match fs::metadata(&git_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ScanError::ReadPath {
+                action: "read git metadata",
+                path: git_path,
+                source,
+            });
+        }
+    };
+
+    if metadata.is_dir() {
+        return Ok(Some(git_path));
+    }
+
+    if metadata.is_file() {
+        let contents = fs::read_to_string(&git_path).map_err(|source| ScanError::ReadPath {
+            action: "read git indirection file",
+            path: git_path.clone(),
+            source,
+        })?;
+        let git_dir = parse_git_dir_reference(&contents).ok_or_else(|| ScanError::ReadPath {
+            action: "parse git indirection file",
+            path: git_path.clone(),
+            source: io::Error::new(io::ErrorKind::InvalidData, "missing `gitdir:` prefix"),
+        })?;
+
+        let resolved = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            root.join(git_dir)
+        };
+
+        return Ok(Some(resolved));
+    }
+
+    Ok(None)
+}
+
+fn parse_git_dir_reference(contents: &str) -> Option<PathBuf> {
+    let line = contents.lines().next()?.trim();
+    let git_dir = line.strip_prefix("gitdir:")?.trim();
+
+    if git_dir.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(git_dir))
+    }
+}
+
+fn parse_origin_url(config: &str) -> Option<String> {
+    let mut in_origin_section = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_origin_section = trimmed[1..trimmed.len() - 1].trim() == r#"remote "origin""#;
+            continue;
+        }
+
+        if !in_origin_section {
+            continue;
+        }
+
+        let (key, value) = trimmed.split_once('=')?;
+        if key.trim() == "url" {
+            let url = value.trim();
+            if !url.is_empty() {
+                return Some(url.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_git_origin(origin: &str) -> String {
+    origin
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_string()
+}
+
 fn read_dir_entries(path: &Path) -> Result<Vec<DirEntry>, ScanError> {
     fs::read_dir(path)
         .map_err(|source| ScanError::ReadPath {
@@ -276,7 +405,7 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{SkippedPathReason, scan_repository};
+    use super::{RepositoryIdentitySource, SkippedPathReason, scan_repository};
     use crate::{DirectoryId, RelativePath, RepositoryGraph};
 
     #[test]
@@ -285,6 +414,7 @@ mod tests {
 
         let scan = scan_repository(tempdir.path()).expect("scan should succeed");
 
+        assert_eq!(scan.identity_source, RepositoryIdentitySource::PathFallback);
         assert_eq!(scan.directories.len(), 1);
         assert_eq!(scan.directories[0].relative_path, RelativePath::root());
         assert!(scan.files.is_empty());
@@ -374,6 +504,93 @@ mod tests {
     }
 
     #[test]
+    fn uses_git_origin_for_repository_identity() {
+        let tempdir = TestDir::new();
+        tempdir.write_git_config(
+            r#"[remote "origin"]
+    url = https://github.com/AdamTMalek/leshy.git
+"#,
+        );
+
+        let scan = scan_repository(tempdir.path()).expect("scan should succeed");
+
+        assert_eq!(scan.identity_source, RepositoryIdentitySource::GitOrigin);
+        assert_eq!(
+            scan.repository.stable_key,
+            "https://github.com/AdamTMalek/leshy"
+        );
+    }
+
+    #[test]
+    fn git_origin_ids_are_stable_across_repository_moves() {
+        let left = TestDir::new();
+        let right = TestDir::new();
+
+        left.write_git_config(
+            r#"[remote "origin"]
+    url = git@github.com:AdamTMalek/leshy.git
+"#,
+        );
+        right.write_git_config(
+            r#"[remote "origin"]
+    url = git@github.com:AdamTMalek/leshy.git
+"#,
+        );
+        left.write_file("src/lib.rs", "");
+        right.write_file("src/lib.rs", "");
+
+        let left_scan = scan_repository(left.path()).expect("left scan should succeed");
+        let right_scan = scan_repository(right.path()).expect("right scan should succeed");
+
+        assert_eq!(
+            left_scan.identity_source,
+            RepositoryIdentitySource::GitOrigin
+        );
+        assert_eq!(
+            right_scan.identity_source,
+            RepositoryIdentitySource::GitOrigin
+        );
+        assert_eq!(left_scan.repository.id, right_scan.repository.id);
+        assert_eq!(left_scan.files[0].id, right_scan.files[0].id);
+    }
+
+    #[test]
+    fn git_repositories_without_origin_use_path_fallback() {
+        let tempdir = TestDir::new();
+        tempdir.write_git_config(
+            r#"[core]
+    repositoryformatversion = 0
+"#,
+        );
+
+        let scan = scan_repository(tempdir.path()).expect("scan should succeed");
+
+        assert_eq!(scan.identity_source, RepositoryIdentitySource::PathFallback);
+    }
+
+    #[test]
+    fn path_fallback_ids_change_across_repository_moves() {
+        let left = TestDir::new();
+        let right = TestDir::new();
+        left.write_file("src/lib.rs", "");
+        right.write_file("src/lib.rs", "");
+
+        let left_scan = scan_repository(left.path()).expect("left scan should succeed");
+        let right_scan = scan_repository(right.path()).expect("right scan should succeed");
+
+        assert_eq!(
+            left_scan.identity_source,
+            RepositoryIdentitySource::PathFallback
+        );
+        assert_eq!(
+            right_scan.identity_source,
+            RepositoryIdentitySource::PathFallback
+        );
+        assert_ne!(left_scan.repository.id, right_scan.repository.id);
+        assert_ne!(left_scan.files[0].id, right_scan.files[0].id);
+    }
+
+    #[test]
     fn skips_symlinks_when_the_platform_allows_creating_them() {
         let tempdir = TestDir::new();
         fs::write(tempdir.path().join("real.rs"), "").expect("real file");
@@ -429,6 +646,20 @@ mod tests {
 
         fn path(&self) -> &Path {
             &self.path
+        }
+
+        fn write_file(&self, relative_path: &str, contents: &str) {
+            let file_path = self.path.join(relative_path);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent).expect("parent directories should be created");
+            }
+            fs::write(file_path, contents).expect("file should be written");
+        }
+
+        fn write_git_config(&self, contents: &str) {
+            fs::create_dir_all(self.path.join(".git")).expect("git directory should be created");
+            fs::write(self.path.join(".git/config"), contents)
+                .expect("git config should be written");
         }
     }
 

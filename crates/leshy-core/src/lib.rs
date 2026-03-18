@@ -11,4 +11,7 @@ pub use crate::graph::{
 };
 pub use crate::ids::{DirectoryId, FileId, RepositoryId, SymbolId};
 pub use crate::path::RelativePath;
-pub use crate::scan::{RepositoryScan, ScanError, SkippedPath, SkippedPathReason, scan_repository};
+pub use crate::scan::{
+    RepositoryIdentitySource, RepositoryScan, ScanError, SkippedPath, SkippedPathReason,
+    scan_repository,
+};
