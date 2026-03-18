@@ -669,7 +669,10 @@ mod tests {
         let ssh_scheme_scan =
             scan_repository(ssh_scheme.path()).expect("ssh scheme scan should succeed");
 
-        assert_eq!(https_scan.repository.stable_key, "github.com/AdamTMalek/leshy");
+        assert_eq!(
+            https_scan.repository.stable_key,
+            "github.com/AdamTMalek/leshy"
+        );
         assert_eq!(
             https_scan.repository.stable_key,
             ssh_scan.repository.stable_key
