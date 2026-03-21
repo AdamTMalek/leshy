@@ -233,6 +233,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "leshy-core",
+ "leshy-lang-rust",
 ]
 
 [[package]]
@@ -240,14 +241,15 @@ name = "leshy-core"
 version = "0.1.0"
 dependencies = [
  "ignore",
- "leshy-lang-rust",
  "tree-sitter",
+ "tree-sitter-rust",
 ]
 
 [[package]]
 name = "leshy-lang-rust"
 version = "0.1.0"
 dependencies = [
+ "leshy-core",
  "tree-sitter",
  "tree-sitter-rust",
 ]

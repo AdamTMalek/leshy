@@ -68,6 +68,7 @@ fn index_command_rejects_file_path() {
         .stderr_contains("Path is not a directory");
 }
 
+#[cfg(feature = "lang-rust")]
 #[test]
 fn index_command_reports_rust_parse_failures() {
     let tempdir = TestDir::new();

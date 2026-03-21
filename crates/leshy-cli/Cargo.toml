@@ -3,6 +3,10 @@ name = "leshy-cli"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["lang-rust"]
+lang-rust = ["dep:leshy-lang-rust"]
+
 [[bin]]
 name = "leshy"
 path = "src/main.rs"
@@ -10,3 +14,4 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.0", features = ["derive"] }
 leshy-core = { path = "../leshy-core" }
+leshy-lang-rust = { path = "../leshy-lang-rust", optional = true }
