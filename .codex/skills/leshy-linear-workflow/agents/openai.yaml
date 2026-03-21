@@ -1,0 +1,4 @@
+interface:
+  display_name: "Leshy Linear Workflow"
+  short_description: "Repo-specific Linear and git workflow"
+  default_prompt: "Use $leshy-linear-workflow to work on LSHY-123 from Linear in this repository."
