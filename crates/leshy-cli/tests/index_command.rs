@@ -15,7 +15,7 @@ fn help_shows_leshy_binary_and_positional_path() {
 #[test]
 fn index_command_succeeds_for_valid_directory() {
     let tempdir = TestDir::new();
-    tempdir.write_file("src/lib.rs", "");
+    tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
 
     let output = Command::new(binary_path())
         .arg("index")
@@ -32,7 +32,7 @@ fn index_command_honors_gitignore_rules() {
     let tempdir = TestDir::new();
     tempdir.write_git_config("");
     tempdir.write_file(".gitignore", "target/\n");
-    tempdir.write_file("src/lib.rs", "");
+    tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
     tempdir.write_file("target/generated.rs", "");
 
     let output = Command::new(binary_path())
@@ -68,19 +68,36 @@ fn index_command_rejects_file_path() {
         .stderr_contains("Path is not a directory");
 }
 
+#[test]
+fn index_command_reports_rust_parse_failures() {
+    let tempdir = TestDir::new();
+    tempdir.write_file("src/lib.rs", "fn broken( {\n");
+
+    Command::new(binary_path())
+        .arg("index")
+        .arg(tempdir.path())
+        .assert_failure()
+        .stderr_contains("failed to parse repository")
+        .stderr_contains("src/lib.rs")
+        .stderr_contains("syntax errors");
+}
+
 struct TestDir {
     path: PathBuf,
 }
 
 impl TestDir {
     fn new() -> Self {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         let unique = format!(
-            "leshy-cli-integration-test-{}-{}",
+            "leshy-cli-integration-test-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system time should be valid")
-                .as_nanos()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let path = std::env::temp_dir().join(unique);
         fs::create_dir(&path).expect("temporary directory should be created");

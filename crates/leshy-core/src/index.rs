@@ -3,13 +3,15 @@ use std::fmt::{Display, Formatter};
 use std::path::Path;
 
 use crate::{
-    DirectoryId, FileId, GraphError, RepositoryGraph, RepositoryScan, ScanError, scan_repository,
+    DirectoryId, FileId, GraphError, ParseError, ParsedFile, RepositoryGraph, RepositoryScan,
+    ScanError, parse_repository_scan, scan_repository,
 };
 
 /// The end-to-end indexing result for a repository root.
 #[derive(Debug)]
 pub struct RepositoryIndex {
     pub scan: RepositoryScan,
+    pub parsed_files: Vec<ParsedFile>,
     pub graph: RepositoryGraph,
 }
 
@@ -18,6 +20,9 @@ pub struct RepositoryIndex {
 pub enum IndexError {
     Scan {
         source: ScanError,
+    },
+    Parse {
+        source: ParseError,
     },
     InsertDirectory {
         directory_id: DirectoryId,
@@ -33,6 +38,7 @@ impl Display for IndexError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Scan { source } => write!(f, "failed to scan repository: {source}"),
+            Self::Parse { source } => write!(f, "failed to parse repository: {source}"),
             Self::InsertDirectory {
                 directory_id,
                 source,
@@ -50,6 +56,7 @@ impl Error for IndexError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Scan { source } => Some(source),
+            Self::Parse { source } => Some(source),
             Self::InsertDirectory { source, .. } => Some(source),
             Self::InsertFile { source, .. } => Some(source),
         }
@@ -59,9 +66,15 @@ impl Error for IndexError {
 /// Scans a repository root and populates a repository graph from the scan output.
 pub fn index_repository(root: &Path) -> Result<RepositoryIndex, IndexError> {
     let scan = scan_repository(root).map_err(|source| IndexError::Scan { source })?;
+    let parsed_files =
+        parse_repository_scan(root, &scan).map_err(|source| IndexError::Parse { source })?;
     let graph = build_graph_from_scan(&scan)?;
 
-    Ok(RepositoryIndex { scan, graph })
+    Ok(RepositoryIndex {
+        scan,
+        parsed_files,
+        graph,
+    })
 }
 
 fn build_graph_from_scan(scan: &RepositoryScan) -> Result<RepositoryGraph, IndexError> {
@@ -95,18 +108,19 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{IndexError, build_graph_from_scan, index_repository};
-    use crate::{DirectoryId, RelativePath, ScanError};
+    use crate::{DirectoryId, ParseError, RelativePath, ScanError};
 
     #[test]
     fn indexes_repository_end_to_end() {
         let tempdir = TestDir::new();
-        tempdir.write_file("src/lib.rs", "");
+        tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
         tempdir.write_file("src/bin/app.rs", "");
 
         let index = index_repository(tempdir.path()).expect("indexing should succeed");
 
         assert_eq!(index.scan.directories.len(), 3);
         assert_eq!(index.scan.files.len(), 2);
+        assert_eq!(index.parsed_files.len(), 2);
         assert_eq!(index.graph.directories().count(), 3);
         assert_eq!(index.graph.files().count(), 2);
         assert_eq!(index.graph.relationships().count(), 5);
@@ -124,6 +138,23 @@ mod tests {
                 source: ScanError::ReadPath { .. }
             }
         ));
+    }
+
+    #[test]
+    fn wraps_parse_failures() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "fn broken( {\n");
+
+        let error = index_repository(tempdir.path()).expect_err("indexing should fail");
+
+        assert!(matches!(
+            error,
+            IndexError::Parse {
+                source: ParseError::SyntaxErrors { .. }
+            }
+        ));
+        assert!(error.to_string().contains("failed to parse repository"));
+        assert!(error.to_string().contains("src/lib.rs"));
     }
 
     #[test]
@@ -169,13 +200,16 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
             let unique = format!(
-                "leshy-index-test-{}-{}",
+                "leshy-index-test-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("system time should be valid")
-                    .as_nanos()
+                    .as_nanos(),
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             );
             let path = std::env::temp_dir().join(unique);
             fs::create_dir(&path).expect("temporary directory should be created");

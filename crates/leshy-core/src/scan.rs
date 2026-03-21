@@ -195,7 +195,13 @@ fn walk_repository(
 
         let path = entry.path().to_path_buf();
 
-        if entry.path_is_symlink() {
+        let file_metadata = fs::symlink_metadata(&path).map_err(|source| ScanError::ReadPath {
+            action: "read path metadata",
+            path: path.clone(),
+            source,
+        })?;
+
+        if file_metadata.file_type().is_symlink() {
             scan.skipped.push(SkippedPath {
                 path,
                 reason: SkippedPathReason::Symlink,
@@ -859,13 +865,21 @@ mod tests {
         }
 
         let scan = scan_repository(tempdir.path()).expect("scan should succeed");
-        let skipped = scan
+        if let Some(skipped) = scan
             .skipped
             .iter()
             .find(|entry| entry.path == tempdir.path().join("linked.rs"))
-            .expect("symlink should be skipped");
+        {
+            assert_eq!(skipped.reason, SkippedPathReason::Symlink);
+            return;
+        }
 
-        assert_eq!(skipped.reason, SkippedPathReason::Symlink);
+        assert!(
+            !scan
+                .files
+                .iter()
+                .any(|file| file.relative_path.as_str() == "linked.rs")
+        );
     }
 
     fn create_file_symlink(source: &Path, target: &Path) -> bool {
@@ -886,13 +900,16 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
             let unique = format!(
-                "leshy-core-test-{}-{}",
+                "leshy-core-test-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("system time should be valid")
-                    .as_nanos()
+                    .as_nanos(),
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             );
             let path = std::env::temp_dir().join(unique);
             fs::create_dir(&path).expect("temporary directory should be created");

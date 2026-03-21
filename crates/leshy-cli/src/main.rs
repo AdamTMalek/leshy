@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn formats_successful_index_summary() {
         let tempdir = TestDir::new();
-        tempdir.write_file("src/lib.rs", "");
+        tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
         let validated =
             validate_project_dir(&tempdir.path().to_string_lossy()).expect("valid directory");
         let index = leshy_core::index_repository(&validated).expect("indexing should succeed");
@@ -208,13 +208,16 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
             let unique = format!(
-                "leshy-cli-test-{}-{}",
+                "leshy-cli-test-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("system time should be valid")
-                    .as_nanos()
+                    .as_nanos(),
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             );
             let path = std::env::temp_dir().join(unique);
             fs::create_dir(&path).expect("temporary directory should be created");
