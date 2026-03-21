@@ -3,8 +3,8 @@ use std::fmt::{Display, Formatter};
 use std::path::Path;
 
 use crate::{
-    DirectoryId, FileId, GraphError, ParseError, ParsedFile, RepositoryGraph, RepositoryScan,
-    ScanError, parse_repository_scan, scan_repository,
+    DirectoryId, FileId, GraphError, LanguagePlugin, ParseError, ParsedFile, RepositoryGraph,
+    RepositoryScan, ScanError, parse_repository_scan, scan_repository,
 };
 
 /// The end-to-end indexing result for a repository root.
@@ -64,10 +64,13 @@ impl Error for IndexError {
 }
 
 /// Scans a repository root and populates a repository graph from the scan output.
-pub fn index_repository(root: &Path) -> Result<RepositoryIndex, IndexError> {
+pub fn index_repository(
+    root: &Path,
+    plugins: &[&dyn LanguagePlugin],
+) -> Result<RepositoryIndex, IndexError> {
     let scan = scan_repository(root).map_err(|source| IndexError::Scan { source })?;
-    let parsed_files =
-        parse_repository_scan(root, &scan).map_err(|source| IndexError::Parse { source })?;
+    let parsed_files = parse_repository_scan(root, &scan, plugins)
+        .map_err(|source| IndexError::Parse { source })?;
     let graph = build_graph_from_scan(&scan)?;
 
     Ok(RepositoryIndex {
@@ -107,8 +110,15 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use tree_sitter::{Parser, Tree};
+
     use super::{IndexError, build_graph_from_scan, index_repository};
-    use crate::{DirectoryId, ParseError, RelativePath, ScanError};
+    use crate::{
+        DirectoryId, LanguagePlugin, LanguagePluginError, ParseError, RelativePath, ScanError,
+        SourceLanguage,
+    };
+
+    static TEST_LANGUAGE_PLUGIN: TestLanguagePlugin = TestLanguagePlugin;
 
     #[test]
     fn indexes_repository_end_to_end() {
@@ -116,7 +126,8 @@ mod tests {
         tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
         tempdir.write_file("src/bin/app.rs", "");
 
-        let index = index_repository(tempdir.path()).expect("indexing should succeed");
+        let index = index_repository(tempdir.path(), &[&TEST_LANGUAGE_PLUGIN])
+            .expect("indexing should succeed");
 
         assert_eq!(index.scan.directories.len(), 3);
         assert_eq!(index.scan.files.len(), 2);
@@ -130,7 +141,8 @@ mod tests {
     #[test]
     fn wraps_scan_failures() {
         let missing_path = unique_temp_path("missing");
-        let error = index_repository(&missing_path).expect_err("indexing should fail");
+        let error = index_repository(&missing_path, &[&TEST_LANGUAGE_PLUGIN])
+            .expect_err("indexing should fail");
 
         assert!(matches!(
             error,
@@ -145,7 +157,8 @@ mod tests {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "fn broken( {\n");
 
-        let error = index_repository(tempdir.path()).expect_err("indexing should fail");
+        let error = index_repository(tempdir.path(), &[&TEST_LANGUAGE_PLUGIN])
+            .expect_err("indexing should fail");
 
         assert!(matches!(
             error,
@@ -192,6 +205,45 @@ mod tests {
             error,
             IndexError::InsertFile { file_id, .. } if file_id == failing_file_id
         ));
+    }
+
+    #[test]
+    fn indexes_without_parsed_files_when_no_plugins_are_registered() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
+
+        let index = index_repository(tempdir.path(), &[]).expect("indexing should succeed");
+
+        assert!(index.parsed_files.is_empty());
+        assert_eq!(index.scan.files.len(), 1);
+        assert_eq!(index.graph.files().count(), 1);
+    }
+
+    struct TestLanguagePlugin;
+
+    impl LanguagePlugin for TestLanguagePlugin {
+        fn language(&self) -> SourceLanguage {
+            SourceLanguage::Rust
+        }
+
+        fn supports_path(&self, path: &Path) -> bool {
+            matches!(
+                path.extension().and_then(std::ffi::OsStr::to_str),
+                Some("rs")
+            )
+        }
+
+        fn parse_source(&self, source_text: &str) -> Result<Tree, LanguagePluginError> {
+            let mut parser = Parser::new();
+            let language = tree_sitter_rust::LANGUAGE.into();
+            parser
+                .set_language(&language)
+                .map_err(|source| LanguagePluginError::ConfigureParser { source })?;
+
+            parser
+                .parse(source_text, None)
+                .ok_or(LanguagePluginError::ParseReturnedNone)
+        }
     }
 
     struct TestDir {

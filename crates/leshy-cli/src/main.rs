@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use leshy_core::{RepositoryIndex, index_repository};
+use leshy_core::{LanguagePlugin, RepositoryIndex, index_repository};
 use std::borrow::Cow;
 use std::fs::canonicalize;
 use std::path::PathBuf;
@@ -46,7 +46,8 @@ fn run(main_args: MainArgs) -> Result<String, CliError> {
 }
 
 fn run_index(path: PathBuf) -> Result<String, CliError> {
-    let index = index_repository(&path).map_err(|source| CliError::Index {
+    let plugins = registered_language_plugins();
+    let index = index_repository(&path, &plugins).map_err(|source| CliError::Index {
         path: path.clone(),
         source: Box::new(source),
     })?;
@@ -72,6 +73,18 @@ fn display_path(path: &std::path::Path) -> Cow<'_, str> {
     }
 
     path
+}
+
+fn registered_language_plugins() -> Vec<&'static dyn LanguagePlugin> {
+    #[cfg(feature = "lang-rust")]
+    {
+        vec![&leshy_lang_rust::RUST_LANGUAGE_PLUGIN]
+    }
+
+    #[cfg(not(feature = "lang-rust"))]
+    {
+        Vec::new()
+    }
 }
 
 #[derive(Debug)]
@@ -122,7 +135,8 @@ mod tests {
     use clap::CommandFactory;
 
     use super::{
-        CliError, MainArgs, display_path, format_index_summary, run_index, validate_project_dir,
+        CliError, MainArgs, display_path, format_index_summary, registered_language_plugins,
+        run_index, validate_project_dir,
     };
 
     #[test]
@@ -193,13 +207,26 @@ mod tests {
         tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
         let validated =
             validate_project_dir(&tempdir.path().to_string_lossy()).expect("valid directory");
-        let index = leshy_core::index_repository(&validated).expect("indexing should succeed");
+        let plugins = registered_language_plugins();
+        let index =
+            leshy_core::index_repository(&validated, &plugins).expect("indexing should succeed");
 
         let summary = format_index_summary(&validated, &index);
 
         assert!(summary.contains(display_path(&validated).as_ref()));
         assert!(summary.contains("Directories: 2"));
         assert!(summary.contains("Files: 1"));
+    }
+
+    #[test]
+    fn registered_language_plugins_can_be_empty() {
+        let plugins = registered_language_plugins();
+
+        #[cfg(feature = "lang-rust")]
+        assert_eq!(plugins.len(), 1);
+
+        #[cfg(not(feature = "lang-rust"))]
+        assert!(plugins.is_empty());
     }
 
     struct TestDir {

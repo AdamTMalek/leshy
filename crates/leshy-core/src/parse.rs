@@ -92,7 +92,7 @@ impl std::error::Error for ParseError {
     }
 }
 
-/// A bundled language integration that can classify and parse repository files.
+/// A language integration that can classify and parse repository files.
 pub trait LanguagePlugin: Sync {
     fn language(&self) -> SourceLanguage;
     fn supports_path(&self, path: &Path) -> bool;
@@ -105,35 +105,16 @@ pub enum LanguagePluginError {
     ParseReturnedNone,
 }
 
-struct RustLanguagePlugin;
-
-impl LanguagePlugin for RustLanguagePlugin {
-    fn language(&self) -> SourceLanguage {
-        SourceLanguage::Rust
-    }
-
-    fn supports_path(&self, path: &Path) -> bool {
-        leshy_lang_rust::supports_path(path)
-    }
-
-    fn parse_source(&self, source_text: &str) -> Result<Tree, LanguagePluginError> {
-        leshy_lang_rust::parse_source(source_text)
-            .map_err(|source| LanguagePluginError::ConfigureParser { source })
-    }
-}
-
-static RUST_LANGUAGE_PLUGIN: RustLanguagePlugin = RustLanguagePlugin;
-static REGISTERED_PLUGINS: [&dyn LanguagePlugin; 1] = [&RUST_LANGUAGE_PLUGIN];
-
 /// Parses all supported source files from a repository scan.
 pub fn parse_repository_scan(
     repository_root: &Path,
     scan: &RepositoryScan,
+    plugins: &[&dyn LanguagePlugin],
 ) -> Result<Vec<ParsedFile>, ParseError> {
     let mut parsed_files = Vec::new();
 
     for file in &scan.files {
-        let Some(plugin) = plugin_for_relative_path(&file.relative_path) else {
+        let Some(plugin) = plugin_for_relative_path(&file.relative_path, plugins) else {
             continue;
         };
 
@@ -168,10 +149,13 @@ pub fn parse_repository_scan(
     Ok(parsed_files)
 }
 
-fn plugin_for_relative_path(path: &RelativePath) -> Option<&'static dyn LanguagePlugin> {
+fn plugin_for_relative_path<'a>(
+    path: &RelativePath,
+    plugins: &'a [&'a dyn LanguagePlugin],
+) -> Option<&'a dyn LanguagePlugin> {
     let file_path = Path::new(path.as_str());
 
-    REGISTERED_PLUGINS
+    plugins
         .iter()
         .copied()
         .find(|plugin| plugin.supports_path(file_path))
@@ -198,12 +182,20 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{ParseError, SourceLanguage, parse_repository_scan, plugin_for_relative_path};
+    use tree_sitter::{Parser, Tree};
+
+    use super::{
+        LanguagePlugin, LanguagePluginError, ParseError, SourceLanguage, parse_repository_scan,
+        plugin_for_relative_path,
+    };
+
+    static TEST_LANGUAGE_PLUGIN: TestLanguagePlugin = TestLanguagePlugin;
 
     #[test]
     fn selects_rust_plugin_for_rust_files() {
         let path = crate::RelativePath::new("src/lib.rs").expect("relative path should build");
-        let plugin = plugin_for_relative_path(&path).expect("rust plugin should match");
+        let plugins = [&TEST_LANGUAGE_PLUGIN as &dyn LanguagePlugin];
+        let plugin = plugin_for_relative_path(&path, &plugins).expect("plugin should match");
 
         assert_eq!(plugin.language(), SourceLanguage::Rust);
     }
@@ -214,7 +206,8 @@ mod tests {
         tempdir.write_file("README.md", "# Leshy");
 
         let scan = crate::scan_repository(tempdir.path()).expect("scan should succeed");
-        let parsed = parse_repository_scan(tempdir.path(), &scan).expect("parse should succeed");
+        let parsed = parse_repository_scan(tempdir.path(), &scan, &[&TEST_LANGUAGE_PLUGIN])
+            .expect("parse should succeed");
 
         assert!(parsed.is_empty());
     }
@@ -225,7 +218,8 @@ mod tests {
         tempdir.write_file("src/lib.rs", "pub fn meaning() -> i32 { 42 }\n");
 
         let scan = crate::scan_repository(tempdir.path()).expect("scan should succeed");
-        let parsed = parse_repository_scan(tempdir.path(), &scan).expect("parse should succeed");
+        let parsed = parse_repository_scan(tempdir.path(), &scan, &[&TEST_LANGUAGE_PLUGIN])
+            .expect("parse should succeed");
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].language, SourceLanguage::Rust);
@@ -240,7 +234,8 @@ mod tests {
         tempdir.write_file("src/lib.rs", "fn broken( {\n");
 
         let scan = crate::scan_repository(tempdir.path()).expect("scan should succeed");
-        let error = parse_repository_scan(tempdir.path(), &scan).expect_err("parse should fail");
+        let error = parse_repository_scan(tempdir.path(), &scan, &[&TEST_LANGUAGE_PLUGIN])
+            .expect_err("parse should fail");
 
         assert!(matches!(
             error,
@@ -248,6 +243,44 @@ mod tests {
                 && language == SourceLanguage::Rust
         ));
         assert!(error.to_string().contains("syntax errors"));
+    }
+
+    #[test]
+    fn skips_all_files_when_no_plugins_are_registered() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub fn meaning() -> i32 { 42 }\n");
+
+        let scan = crate::scan_repository(tempdir.path()).expect("scan should succeed");
+        let parsed = parse_repository_scan(tempdir.path(), &scan, &[]).expect("parse should skip");
+
+        assert!(parsed.is_empty());
+    }
+
+    struct TestLanguagePlugin;
+
+    impl LanguagePlugin for TestLanguagePlugin {
+        fn language(&self) -> SourceLanguage {
+            SourceLanguage::Rust
+        }
+
+        fn supports_path(&self, path: &Path) -> bool {
+            matches!(
+                path.extension().and_then(std::ffi::OsStr::to_str),
+                Some("rs")
+            )
+        }
+
+        fn parse_source(&self, source_text: &str) -> Result<Tree, LanguagePluginError> {
+            let mut parser = Parser::new();
+            let language = tree_sitter_rust::LANGUAGE.into();
+            parser
+                .set_language(&language)
+                .map_err(|source| LanguagePluginError::ConfigureParser { source })?;
+
+            parser
+                .parse(source_text, None)
+                .ok_or(LanguagePluginError::ParseReturnedNone)
+        }
     }
 
     struct TestDir {

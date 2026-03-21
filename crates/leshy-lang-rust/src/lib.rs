@@ -1,6 +1,11 @@
 use std::path::Path;
 
+use leshy_core::{LanguagePlugin, LanguagePluginError, SourceLanguage};
 use tree_sitter::{LanguageError, Parser, Tree};
+
+pub static RUST_LANGUAGE_PLUGIN: RustLanguagePlugin = RustLanguagePlugin;
+
+pub struct RustLanguagePlugin;
 
 pub fn supports_path(path: &Path) -> bool {
     matches!(
@@ -17,6 +22,20 @@ pub fn parse_source(source_text: &str) -> Result<Tree, LanguageError> {
     Ok(parser
         .parse(source_text, None)
         .expect("tree-sitter parser should return a tree for in-memory Rust source"))
+}
+
+impl LanguagePlugin for RustLanguagePlugin {
+    fn language(&self) -> SourceLanguage {
+        SourceLanguage::Rust
+    }
+
+    fn supports_path(&self, path: &Path) -> bool {
+        supports_path(path)
+    }
+
+    fn parse_source(&self, source_text: &str) -> Result<Tree, LanguagePluginError> {
+        parse_source(source_text).map_err(|source| LanguagePluginError::ConfigureParser { source })
+    }
 }
 
 #[cfg(test)]
