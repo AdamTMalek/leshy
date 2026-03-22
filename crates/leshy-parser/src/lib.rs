@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use leshy_core::{FileId, RelativePath, RepositoryScan};
+use leshy_core::{ExtractedSymbol, FileId, RelativePath, RepositoryScan};
 use tree_sitter::Tree;
 
 /// Stable identifier for a source language handled by parser plugins.
@@ -104,6 +104,9 @@ pub trait LanguagePlugin: Sync {
     fn language(&self) -> LanguageId;
     fn supports_path(&self, path: &Path) -> bool;
     fn parse_source(&self, source_text: &str) -> Result<Tree, LanguagePluginError>;
+    fn extract_symbols(&self, _parsed_file: &ParsedFile) -> Vec<ExtractedSymbol> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug)]
@@ -153,6 +156,13 @@ impl LanguageRegistry {
             .copied()
             .find(|plugin| plugin.supports_path(file_path))
     }
+
+    fn plugin_for_language(&self, language: LanguageId) -> Option<&'static dyn LanguagePlugin> {
+        self.plugins
+            .iter()
+            .copied()
+            .find(|plugin| plugin.language() == language)
+    }
 }
 
 /// Parses all supported source files from a repository scan.
@@ -199,6 +209,24 @@ pub fn parse_repository_scan(
     Ok(parsed_files)
 }
 
+/// Extracts language-level symbols from parsed repository files.
+pub fn extract_symbols(
+    parsed_files: &[ParsedFile],
+    registry: &LanguageRegistry,
+) -> Vec<ExtractedSymbol> {
+    let mut symbols = Vec::new();
+
+    for parsed_file in parsed_files {
+        let Some(plugin) = registry.plugin_for_language(parsed_file.language) else {
+            continue;
+        };
+
+        symbols.extend(plugin.extract_symbols(parsed_file));
+    }
+
+    symbols
+}
+
 fn map_plugin_error(
     error: LanguagePluginError,
     path: RelativePath,
@@ -220,11 +248,12 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use leshy_core::{ExtractedSymbol, SourcePosition, SourceSpan, SymbolKind};
     use tree_sitter::Tree;
 
     use super::{
         LanguageId, LanguagePlugin, LanguagePluginError, LanguageRegistry, ParseError,
-        parse_repository_scan,
+        extract_symbols, parse_repository_scan,
     };
 
     static RS_PLUGIN: MatchByExtensionPlugin = MatchByExtensionPlugin {
@@ -287,6 +316,22 @@ mod tests {
         assert!(parsed.is_empty());
     }
 
+    #[test]
+    fn dispatches_symbol_extraction_to_matching_plugin() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub fn meaning() {}\n");
+        let registry = LanguageRegistry::new().with_plugin(&ExtractSymbolPlugin);
+
+        let scan = leshy_core::scan_repository(tempdir.path()).expect("scan should succeed");
+        let parsed =
+            parse_repository_scan(tempdir.path(), &scan, &registry).expect("parse should succeed");
+        let symbols = extract_symbols(&parsed, &registry);
+
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].display_name, "sample_symbol");
+        assert_eq!(symbols[0].kind, SymbolKind::Function);
+    }
+
     struct MatchByExtensionPlugin {
         extension: &'static str,
         language: LanguageId,
@@ -325,6 +370,51 @@ mod tests {
 
         fn parse_source(&self, _source_text: &str) -> Result<Tree, LanguagePluginError> {
             Err(LanguagePluginError::ParseReturnedNone)
+        }
+    }
+
+    struct ExtractSymbolPlugin;
+
+    impl LanguagePlugin for ExtractSymbolPlugin {
+        fn language(&self) -> LanguageId {
+            LanguageId::new("extract-symbol")
+        }
+
+        fn supports_path(&self, path: &Path) -> bool {
+            matches!(
+                path.extension().and_then(std::ffi::OsStr::to_str),
+                Some("rs")
+            )
+        }
+
+        fn parse_source(&self, source_text: &str) -> Result<Tree, LanguagePluginError> {
+            let mut parser = tree_sitter::Parser::new();
+            let language = tree_sitter_rust::LANGUAGE.into();
+            parser
+                .set_language(&language)
+                .map_err(|source| LanguagePluginError::ConfigureParser { source })?;
+
+            parser
+                .parse(source_text, None)
+                .ok_or(LanguagePluginError::ParseReturnedNone)
+        }
+
+        fn extract_symbols(&self, parsed_file: &super::ParsedFile) -> Vec<ExtractedSymbol> {
+            vec![
+                ExtractedSymbol::new(
+                    parsed_file.file_id,
+                    parsed_file.relative_path.clone(),
+                    SymbolKind::Function,
+                    "sample_symbol",
+                    SourceSpan::new(
+                        0,
+                        parsed_file.source_text.len(),
+                        SourcePosition::new(0, 0),
+                        SourcePosition::new(0, parsed_file.source_text.len()),
+                    ),
+                )
+                .expect("test symbol should build"),
+            ]
         }
     }
 

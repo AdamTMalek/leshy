@@ -257,6 +257,7 @@ dependencies = [
 name = "leshy-lang-rust"
 version = "0.1.0"
 dependencies = [
+ "leshy-core",
  "leshy-parser",
  "tree-sitter",
  "tree-sitter-rust",
@@ -268,6 +269,7 @@ version = "0.1.0"
 dependencies = [
  "leshy-core",
  "tree-sitter",
+ "tree-sitter-rust",
 ]
 
 [[package]]

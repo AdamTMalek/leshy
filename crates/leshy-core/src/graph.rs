@@ -152,6 +152,78 @@ pub enum SymbolKind {
     Constant,
 }
 
+/// A zero-based source position within a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourcePosition {
+    pub line: usize,
+    pub column: usize,
+}
+
+impl SourcePosition {
+    /// Creates a source position from zero-based line and column coordinates.
+    pub fn new(line: usize, column: usize) -> Self {
+        Self { line, column }
+    }
+}
+
+/// A source span describing where a symbol is defined within a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub start: SourcePosition,
+    pub end: SourcePosition,
+}
+
+impl SourceSpan {
+    /// Creates a source span from byte offsets and zero-based line and column positions.
+    pub fn new(
+        start_byte: usize,
+        end_byte: usize,
+        start: SourcePosition,
+        end: SourcePosition,
+    ) -> Self {
+        Self {
+            start_byte,
+            end_byte,
+            start,
+            end,
+        }
+    }
+}
+
+/// A language-level symbol extracted from parsed source code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractedSymbol {
+    pub file_id: FileId,
+    pub relative_path: RelativePath,
+    pub kind: SymbolKind,
+    pub display_name: String,
+    pub span: SourceSpan,
+}
+
+impl ExtractedSymbol {
+    /// Creates an extracted symbol record.
+    pub fn new(
+        file_id: FileId,
+        relative_path: RelativePath,
+        kind: SymbolKind,
+        display_name: impl Into<String>,
+        span: SourceSpan,
+    ) -> Result<Self, GraphError> {
+        let display_name = display_name.into();
+        check_name_is_not_blank("symbol", &display_name)?;
+
+        Ok(Self {
+            file_id,
+            relative_path,
+            kind,
+            display_name,
+            span,
+        })
+    }
+}
+
 /// The owning container for a symbol definition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolOwner {
