@@ -697,6 +697,62 @@ mod tests {
     }
 
     #[test]
+    fn keeps_lib_and_main_crates_in_one_package_scoped_separately() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "pub struct Widget;\nimpl Widget { fn from_lib() -> Self { Self } }\n",
+        );
+        tempdir.write_file(
+            "src/main.rs",
+            "pub struct Widget;\nimpl Widget { fn from_main() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let lib_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+            .expect("lib file should be parsed");
+        let main_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/main.rs")
+            .expect("main file should be parsed");
+
+        let from_lib = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "method:Widget::from_lib",
+            ))
+            .expect("lib method should exist");
+        let from_main = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                main_file.file_id,
+                "method:Widget::from_main",
+            ))
+            .expect("main method should exist");
+
+        assert_eq!(
+            from_lib.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "type:Widget",
+            ))
+        );
+        assert_eq!(
+            from_main.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                main_file.file_id,
+                "type:Widget",
+            ))
+        );
+    }
+
+    #[test]
     fn treats_src_bin_files_as_crate_roots() {
         let tempdir = TestDir::new();
         tempdir.write_file(

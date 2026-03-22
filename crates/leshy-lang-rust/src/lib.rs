@@ -83,7 +83,10 @@ impl LanguagePlugin for RustLanguagePlugin {
         let repository_keys = collect_repository_symbol_owners(parsed_files);
 
         for parsed_file in parsed_files {
-            let crate_scope = crate_scope(parsed_file);
+            let Some(crate_scope) = resolved_crate_scope_for_file(parsed_file, &repository_keys)
+            else {
+                continue;
+            };
             let crate_keys = repository_keys
                 .get(&crate_scope)
                 .expect("crate scope should be collected");
@@ -146,7 +149,7 @@ impl ExtractionContext {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RustSourceLayout {
-    crate_scope: String,
+    package_prefix: String,
     namespace: Vec<String>,
 }
 
@@ -673,8 +676,10 @@ fn collect_repository_symbol_owners(parsed_files: &[&ParsedFile]) -> RepositoryS
     let mut keys: RepositorySymbolOwners = BTreeMap::new();
 
     for parsed_file in parsed_files {
+        let Some(crate_scope) = direct_crate_scope(parsed_file) else {
+            continue;
+        };
         let context = ExtractionContext::file(parsed_file, None);
-        let crate_scope = crate_scope(parsed_file);
         let crate_keys = keys.entry(crate_scope).or_default();
         collect_local_type_keys_into(
             parsed_file.tree.root_node(),
@@ -690,7 +695,82 @@ fn collect_repository_symbol_owners(parsed_files: &[&ParsedFile]) -> RepositoryS
         );
     }
 
+    for parsed_file in parsed_files {
+        if direct_crate_scope(parsed_file).is_some() {
+            continue;
+        }
+
+        let Some(crate_scope) = resolved_crate_scope_for_file(parsed_file, &keys) else {
+            continue;
+        };
+        let crate_keys = keys
+            .get_mut(&crate_scope)
+            .expect("resolved crate scope should exist");
+        let context = ExtractionContext::file(
+            parsed_file,
+            module_owner_for_file(parsed_file, &crate_keys.module_owners),
+        );
+        collect_local_type_keys_into(
+            parsed_file.tree.root_node(),
+            parsed_file,
+            &context,
+            &mut crate_keys.type_owners,
+        );
+        collect_module_owners_into(
+            parsed_file.tree.root_node(),
+            parsed_file,
+            &context,
+            &mut crate_keys.module_owners,
+        );
+    }
+
     keys
+}
+
+fn resolved_crate_scope_for_file(
+    parsed_file: &ParsedFile,
+    repository_keys: &RepositorySymbolOwners,
+) -> Option<String> {
+    if let Some(scope) = direct_crate_scope(parsed_file) {
+        return Some(scope);
+    }
+
+    let package_prefix = package_prefix(parsed_file);
+    let namespace = file_namespace(parsed_file);
+    let module_key = (!namespace.is_empty()).then(|| format!("module:{}", namespace.join("::")));
+
+    let mut candidates: Vec<String> = repository_keys
+        .iter()
+        .filter_map(|(scope, crate_keys)| {
+            if !scope_matches_package(scope, &package_prefix) {
+                return None;
+            }
+
+            if let Some(module_key) = &module_key
+                && crate_keys.module_owners.contains_key(module_key)
+            {
+                return Some(scope.clone());
+            }
+
+            None
+        })
+        .collect();
+
+    if candidates.len() == 1 {
+        return candidates.pop();
+    }
+
+    let mut package_scopes: Vec<String> = repository_keys
+        .keys()
+        .filter(|scope| scope_matches_package(scope, &package_prefix))
+        .cloned()
+        .collect();
+
+    if package_scopes.len() == 1 {
+        return package_scopes.pop();
+    }
+
+    None
 }
 
 fn collect_module_owners_into(
@@ -749,8 +829,44 @@ fn file_namespace(parsed_file: &ParsedFile) -> Vec<String> {
     rust_source_layout(parsed_file).namespace
 }
 
-fn crate_scope(parsed_file: &ParsedFile) -> String {
-    rust_source_layout(parsed_file).crate_scope
+fn package_prefix(parsed_file: &ParsedFile) -> String {
+    rust_source_layout(parsed_file).package_prefix
+}
+
+fn direct_crate_scope(parsed_file: &ParsedFile) -> Option<String> {
+    let path = parsed_file.relative_path.as_str();
+    let path_segments: Vec<&str> = path.split('/').collect();
+    let src_index = path_segments
+        .iter()
+        .position(|segment| *segment == "src")
+        .unwrap_or(0);
+    let package_prefix = if path_segments.get(src_index) == Some(&"src") {
+        join_layout_segments(&path_segments[..src_index])
+    } else {
+        String::new()
+    };
+    let crate_relative_segments = if path_segments.get(src_index) == Some(&"src") {
+        &path_segments[src_index + 1..]
+    } else {
+        &path_segments[..]
+    };
+
+    match crate_relative_segments {
+        ["lib.rs"] => Some(crate_scope_key(&package_prefix, "lib")),
+        ["main.rs"] => Some(crate_scope_key(&package_prefix, "main")),
+        ["bin", file_name] if file_name.ends_with(".rs") => {
+            let binary_name = file_name.strip_suffix(".rs")?;
+            Some(crate_scope_key(
+                &package_prefix,
+                &format!("bin/{binary_name}"),
+            ))
+        }
+        ["bin", binary_name, "main.rs"] => Some(crate_scope_key(
+            &package_prefix,
+            &format!("bin/{binary_name}"),
+        )),
+        _ => None,
+    }
 }
 
 fn rust_source_layout(parsed_file: &ParsedFile) -> RustSourceLayout {
@@ -776,7 +892,7 @@ fn rust_source_layout(parsed_file: &ParsedFile) -> RustSourceLayout {
     }
 
     RustSourceLayout {
-        crate_scope: join_layout_segments(crate_prefix),
+        package_prefix: join_layout_segments(crate_prefix),
         namespace: module_namespace_from_segments(crate_relative_segments),
     }
 }
@@ -790,15 +906,12 @@ fn binary_source_layout(
     }
 
     match crate_relative_segments {
-        ["bin", file_name] if file_name.ends_with(".rs") => {
-            let binary_name = file_name.strip_suffix(".rs")?;
-            Some(RustSourceLayout {
-                crate_scope: join_layout_segments_with_suffix(crate_prefix, &["bin", binary_name]),
-                namespace: Vec::new(),
-            })
-        }
-        ["bin", binary_name, rest @ ..] => Some(RustSourceLayout {
-            crate_scope: join_layout_segments_with_suffix(crate_prefix, &["bin", binary_name]),
+        ["bin", file_name] if file_name.ends_with(".rs") => Some(RustSourceLayout {
+            package_prefix: join_layout_segments(crate_prefix),
+            namespace: Vec::new(),
+        }),
+        ["bin", _binary_name, rest @ ..] => Some(RustSourceLayout {
+            package_prefix: join_layout_segments(crate_prefix),
             namespace: module_namespace_from_segments(rest),
         }),
         _ => None,
@@ -830,13 +943,20 @@ fn join_layout_segments(segments: &[&str]) -> String {
     segments.join("/")
 }
 
-fn join_layout_segments_with_suffix(prefix: &[&str], suffix: &[&str]) -> String {
-    prefix
-        .iter()
-        .chain(suffix.iter())
-        .copied()
-        .collect::<Vec<_>>()
-        .join("/")
+fn crate_scope_key(package_prefix: &str, target: &str) -> String {
+    if package_prefix.is_empty() {
+        format!("#{target}")
+    } else {
+        format!("{package_prefix}#{target}")
+    }
+}
+
+fn scope_matches_package(scope: &str, package_prefix: &str) -> bool {
+    scope
+        .split_once('#')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or("")
+        == package_prefix
 }
 
 fn starts_with_dyn_keyword(trimmed: &str) -> bool {

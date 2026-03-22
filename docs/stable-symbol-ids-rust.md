@@ -13,7 +13,7 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 1. Rust symbol namespaces are crate-local, not repository-relative.
 2. The module root is the crate's `src/` directory, even when the crate lives inside a workspace path such as `crates/<name>/src/`.
 3. For Rust stable keys, repository path prefixes outside the crate root must never appear in canonical symbol paths.
-4. `src/lib.rs` and `src/main.rs` define the crate root namespace.
+4. `src/lib.rs` and `src/main.rs` each define a crate root namespace, but they are distinct crate scopes for owner resolution.
 5. `src/bin/<name>.rs` defines a binary crate root namespace, not `bin::<name>`.
 6. `src/bin/<name>/main.rs` defines a binary crate root namespace, not `bin::<name>`.
 7. Files under `src/bin/<name>/...` are namespaced relative to that binary crate root.
@@ -53,6 +53,7 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 6. If an impl target resolves to a local repository type through an import, module path, or equivalent local spelling, the owner must point to that local type symbol.
 7. Impl ownership must not depend on whether the type definition appears earlier or later in source.
 8. Impl ownership resolution must not bind a symbol in one crate to a type symbol from another crate merely because the crate-local path text matches.
+9. A package's library crate and binary crate must be treated as separate crate scopes even when they share the same `src/` directory.
 
 ## 5. Rust associated item rules
 
