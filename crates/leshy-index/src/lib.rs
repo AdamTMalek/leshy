@@ -854,6 +854,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn indexes_dyn_trait_and_nominal_dyn_type_impls_without_key_collisions() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "trait Trait {}\nstruct dynTrait;\nimpl dyn Trait { fn collide(&self) {} }\nimpl dynTrait { fn collide(&self) {} }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let lib_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+            .expect("lib file should be parsed");
+
+        assert!(
+            index
+                .graph
+                .symbol(leshy_core::SymbolId::new(
+                    lib_file.file_id,
+                    "method:dyn Trait::collide",
+                ))
+                .is_some(),
+            "dyn trait method should exist"
+        );
+        assert!(
+            index
+                .graph
+                .symbol(leshy_core::SymbolId::new(
+                    lib_file.file_id,
+                    "method:dynTrait::collide",
+                ))
+                .is_some(),
+            "nominal dynTrait method should exist"
+        );
+    }
+
     struct TestDir {
         path: PathBuf,
     }

@@ -522,10 +522,9 @@ fn canonicalize_type_like_target(
     local_type_keys: &TypeOwners,
     use_aliases: &UseAliases,
 ) -> CanonicalTypeTarget {
-    let compact = compact_type_name(raw);
     let Some((path_prefix, suffix)) = split_path_prefix_and_suffix(raw) else {
         return CanonicalTypeTarget {
-            stable_target: compact,
+            stable_target: unresolved_type_like_target(raw),
             local_owner: None,
         };
     };
@@ -538,6 +537,15 @@ fn canonicalize_type_like_target(
     CanonicalTypeTarget {
         stable_target: format!("{stable_prefix}{suffix}"),
         local_owner: resolved.local_owner,
+    }
+}
+
+fn unresolved_type_like_target(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if starts_with_dyn_keyword(trimmed) {
+        trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        compact_type_name(trimmed)
     }
 }
 
@@ -1894,5 +1902,44 @@ impl B for Stream {
             associated_types[3].owner,
             leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Stream"))
         );
+    }
+
+    #[test]
+    fn keeps_dyn_trait_fallback_keys_distinct_from_nominal_types() {
+        let source = r#"
+trait Trait {}
+
+struct dynTrait;
+
+impl dyn Trait {
+    fn collide(&self) {}
+}
+
+impl dynTrait {
+    fn collide(&self) {}
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let dyn_trait_method = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "method:dyn Trait::collide")
+            .expect("dyn trait method should exist");
+        let nominal_method = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "method:dynTrait::collide")
+            .expect("nominal dynTrait method should exist");
+
+        assert_ne!(dyn_trait_method.id, nominal_method.id);
+        assert_ne!(dyn_trait_method.stable_key, nominal_method.stable_key);
     }
 }
