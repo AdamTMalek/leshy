@@ -3,5 +3,7 @@ resolver = "3"
 members =[
     "crates/leshy-cli",
     "crates/leshy-core",
+    "crates/leshy-index",
     "crates/leshy-lang-rust",
+    "crates/leshy-parser",
 ]

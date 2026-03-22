@@ -1,9 +1,10 @@
 use std::path::Path;
 
-use leshy_core::{LanguagePlugin, LanguagePluginError, SourceLanguage};
-use tree_sitter::{LanguageError, Parser, Tree};
+use leshy_parser::{LanguageId, LanguagePlugin, LanguagePluginError};
+use tree_sitter::{Parser, Tree};
 
 pub static RUST_LANGUAGE_PLUGIN: RustLanguagePlugin = RustLanguagePlugin;
+pub const RUST_LANGUAGE_ID: LanguageId = LanguageId::new("rust");
 
 pub struct RustLanguagePlugin;
 
@@ -14,19 +15,21 @@ pub fn supports_path(path: &Path) -> bool {
     )
 }
 
-pub fn parse_source(source_text: &str) -> Result<Tree, LanguageError> {
+pub fn parse_source(source_text: &str) -> Result<Tree, LanguagePluginError> {
     let mut parser = Parser::new();
     let language = tree_sitter_rust::LANGUAGE.into();
-    parser.set_language(&language)?;
+    parser
+        .set_language(&language)
+        .map_err(|source| LanguagePluginError::ConfigureParser { source })?;
 
-    Ok(parser
+    parser
         .parse(source_text, None)
-        .expect("tree-sitter parser should return a tree for in-memory Rust source"))
+        .ok_or(LanguagePluginError::ParseReturnedNone)
 }
 
 impl LanguagePlugin for RustLanguagePlugin {
-    fn language(&self) -> SourceLanguage {
-        SourceLanguage::Rust
+    fn language(&self) -> LanguageId {
+        RUST_LANGUAGE_ID
     }
 
     fn supports_path(&self, path: &Path) -> bool {
@@ -34,7 +37,7 @@ impl LanguagePlugin for RustLanguagePlugin {
     }
 
     fn parse_source(&self, source_text: &str) -> Result<Tree, LanguagePluginError> {
-        parse_source(source_text).map_err(|source| LanguagePluginError::ConfigureParser { source })
+        parse_source(source_text)
     }
 }
 

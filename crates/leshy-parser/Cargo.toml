@@ -1,0 +1,8 @@
+[package]
+name = "leshy-parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leshy-core = { path = "../leshy-core" }
+tree-sitter = "0.25.10"

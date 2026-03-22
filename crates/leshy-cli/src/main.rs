@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
-use leshy_core::{LanguagePlugin, RepositoryIndex, index_repository};
+use leshy_index::{RepositoryIndex, index_repository};
+use leshy_parser::LanguageRegistry;
 use std::borrow::Cow;
 use std::fs::canonicalize;
 use std::path::PathBuf;
@@ -46,8 +47,8 @@ fn run(main_args: MainArgs) -> Result<String, CliError> {
 }
 
 fn run_index(path: PathBuf) -> Result<String, CliError> {
-    let plugins = registered_language_plugins();
-    let index = index_repository(&path, &plugins).map_err(|source| CliError::Index {
+    let registry = registered_language_registry();
+    let index = index_repository(&path, &registry).map_err(|source| CliError::Index {
         path: path.clone(),
         source: Box::new(source),
     })?;
@@ -75,23 +76,22 @@ fn display_path(path: &std::path::Path) -> Cow<'_, str> {
     path
 }
 
-fn registered_language_plugins() -> Vec<&'static dyn LanguagePlugin> {
+fn registered_language_registry() -> LanguageRegistry {
+    let mut registry = LanguageRegistry::new();
+
     #[cfg(feature = "lang-rust")]
     {
-        vec![&leshy_lang_rust::RUST_LANGUAGE_PLUGIN]
+        registry.register(&leshy_lang_rust::RUST_LANGUAGE_PLUGIN);
     }
 
-    #[cfg(not(feature = "lang-rust"))]
-    {
-        Vec::new()
-    }
+    registry
 }
 
 #[derive(Debug)]
 enum CliError {
     Index {
         path: PathBuf,
-        source: Box<leshy_core::IndexError>,
+        source: Box<leshy_index::IndexError>,
     },
 }
 
@@ -135,7 +135,7 @@ mod tests {
     use clap::CommandFactory;
 
     use super::{
-        CliError, MainArgs, display_path, format_index_summary, registered_language_plugins,
+        CliError, MainArgs, display_path, format_index_summary, registered_language_registry,
         run_index, validate_project_dir,
     };
 
@@ -207,9 +207,9 @@ mod tests {
         tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
         let validated =
             validate_project_dir(&tempdir.path().to_string_lossy()).expect("valid directory");
-        let plugins = registered_language_plugins();
+        let registry = registered_language_registry();
         let index =
-            leshy_core::index_repository(&validated, &plugins).expect("indexing should succeed");
+            leshy_index::index_repository(&validated, &registry).expect("indexing should succeed");
 
         let summary = format_index_summary(&validated, &index);
 
@@ -219,14 +219,14 @@ mod tests {
     }
 
     #[test]
-    fn registered_language_plugins_can_be_empty() {
-        let plugins = registered_language_plugins();
+    fn registered_language_registry_can_be_empty() {
+        let registry = registered_language_registry();
 
         #[cfg(feature = "lang-rust")]
-        assert_eq!(plugins.len(), 1);
+        assert_eq!(registry.len(), 1);
 
         #[cfg(not(feature = "lang-rust"))]
-        assert!(plugins.is_empty());
+        assert!(registry.is_empty());
     }
 
     struct TestDir {

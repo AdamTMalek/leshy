@@ -1,8 +1,6 @@
 mod error;
 mod graph;
 mod ids;
-mod index;
-mod parse;
 mod path;
 mod scan;
 
@@ -12,11 +10,6 @@ pub use crate::graph::{
     Repository, RepositoryGraph, Symbol, SymbolKind, SymbolOwner,
 };
 pub use crate::ids::{DirectoryId, FileId, RepositoryId, SymbolId};
-pub use crate::index::{IndexError, RepositoryIndex, index_repository};
-pub use crate::parse::{
-    LanguagePlugin, LanguagePluginError, ParseError, ParsedFile, SourceLanguage,
-    parse_repository_scan,
-};
 pub use crate::path::RelativePath;
 pub use crate::scan::{
     RepositoryIdentitySource, RepositoryScan, ScanError, SkippedPath, SkippedPathReason,
