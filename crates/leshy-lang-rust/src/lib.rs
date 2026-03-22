@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use leshy_core::{ExtractedSymbol, SourcePosition, SourceSpan, SymbolKind, SymbolOwner};
@@ -30,18 +30,30 @@ pub fn parse_source(source_text: &str) -> Result<Tree, LanguagePluginError> {
 }
 
 pub fn extract_symbols(parsed_file: &ParsedFile) -> Vec<ExtractedSymbol> {
-    let mut symbols = Vec::new();
-    let local_type_keys = collect_local_type_keys(
-        parsed_file.tree.root_node(),
+    let context = ExtractionContext::file(parsed_file);
+    let use_aliases = collect_use_aliases(parsed_file, &context);
+    extract_symbols_with_resolution(
         parsed_file,
-        &ExtractionContext::file(),
-    );
+        &context,
+        &collect_local_type_keys(parsed_file.tree.root_node(), parsed_file, &context),
+        &use_aliases,
+    )
+}
+
+fn extract_symbols_with_resolution(
+    parsed_file: &ParsedFile,
+    context: &ExtractionContext,
+    local_type_keys: &TypeOwners,
+    use_aliases: &UseAliases,
+) -> Vec<ExtractedSymbol> {
+    let mut symbols = Vec::new();
     visit_item_list(
         parsed_file.tree.root_node(),
         parsed_file,
-        &ExtractionContext::file(),
+        context,
         &mut symbols,
-        &local_type_keys,
+        local_type_keys,
+        use_aliases,
     );
     symbols
 }
@@ -62,6 +74,26 @@ impl LanguagePlugin for RustLanguagePlugin {
     fn extract_symbols(&self, parsed_file: &ParsedFile) -> Vec<ExtractedSymbol> {
         extract_symbols(parsed_file)
     }
+
+    fn finalize_symbols(
+        &self,
+        parsed_files: &[&ParsedFile],
+        symbols_by_file: &mut BTreeMap<leshy_core::FileId, Vec<ExtractedSymbol>>,
+    ) {
+        let repository_type_keys = collect_repository_type_keys(parsed_files);
+
+        for parsed_file in parsed_files {
+            let context = ExtractionContext::file(parsed_file);
+            let use_aliases = collect_use_aliases(parsed_file, &context);
+            let symbols = extract_symbols_with_resolution(
+                parsed_file,
+                &context,
+                &repository_type_keys,
+                &use_aliases,
+            );
+            symbols_by_file.insert(parsed_file.file_id, symbols);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,26 +104,26 @@ struct ExtractionContext {
 }
 
 impl ExtractionContext {
-    fn file() -> Self {
+    fn file(parsed_file: &ParsedFile) -> Self {
         Self {
-            namespace: Vec::new(),
+            namespace: file_namespace(parsed_file),
             owner: NestingOwner::File,
             member_kind: MemberKind::FileLike,
         }
     }
 
-    fn module(&self, owner_key: String, segment: &str) -> Self {
+    fn module(&self, owner_id: leshy_core::SymbolId, segment: &str) -> Self {
         Self {
             namespace: extend_namespace(self, segment),
-            owner: NestingOwner::Symbol(owner_key),
+            owner: NestingOwner::Symbol(owner_id),
             member_kind: MemberKind::FileLike,
         }
     }
 
-    fn type_like(&self, owner_key: String, stable_owner: String) -> Self {
+    fn type_like(&self, owner_id: leshy_core::SymbolId, stable_owner: String) -> Self {
         Self {
             namespace: self.namespace.clone(),
-            owner: NestingOwner::Symbol(owner_key),
+            owner: NestingOwner::Symbol(owner_id),
             member_kind: MemberKind::TypeLike { stable_owner },
         }
     }
@@ -108,7 +140,7 @@ impl ExtractionContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NestingOwner {
     File,
-    Symbol(String),
+    Symbol(leshy_core::SymbolId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,12 +154,20 @@ fn visit_item_list(
     parsed_file: &ParsedFile,
     context: &ExtractionContext,
     symbols: &mut Vec<ExtractedSymbol>,
-    local_type_keys: &BTreeSet<String>,
+    local_type_keys: &TypeOwners,
+    use_aliases: &UseAliases,
 ) {
     let mut cursor = node.walk();
 
     for child in node.named_children(&mut cursor) {
-        visit_item(child, parsed_file, context, symbols, local_type_keys);
+        visit_item(
+            child,
+            parsed_file,
+            context,
+            symbols,
+            local_type_keys,
+            use_aliases,
+        );
     }
 }
 
@@ -136,7 +176,8 @@ fn visit_item(
     parsed_file: &ParsedFile,
     context: &ExtractionContext,
     symbols: &mut Vec<ExtractedSymbol>,
-    local_type_keys: &BTreeSet<String>,
+    local_type_keys: &TypeOwners,
+    use_aliases: &UseAliases,
 ) {
     match node.kind() {
         "mod_item" => {
@@ -145,6 +186,7 @@ fn visit_item(
             };
             let module_path = join_path(namespace(context), &name);
             let stable_key = format!("module:{module_path}");
+            let module_id = leshy_core::SymbolId::new(parsed_file.file_id, &stable_key);
             push_symbol(
                 symbols,
                 parsed_file,
@@ -158,9 +200,10 @@ fn visit_item(
                 visit_item_list(
                     body,
                     parsed_file,
-                    &context.module(stable_key, &name),
+                    &context.module(module_id, &name),
                     symbols,
                     local_type_keys,
+                    use_aliases,
                 );
             }
         }
@@ -170,6 +213,7 @@ fn visit_item(
                 return;
             };
             let stable_key = type_stable_key(node, context, &name);
+            let symbol_id = leshy_core::SymbolId::new(parsed_file.file_id, &stable_key);
             push_symbol(
                 symbols,
                 parsed_file,
@@ -185,17 +229,22 @@ fn visit_item(
                 visit_item_list(
                     body,
                     parsed_file,
-                    &context.type_like(stable_key.clone(), stable_owner_name(&stable_key)),
+                    &context.type_like(symbol_id, stable_owner_name(&stable_key)),
                     symbols,
                     local_type_keys,
+                    use_aliases,
                 );
             }
         }
         "impl_item" => {
             if let Some(body) = node.child_by_field_name("body") {
-                let Some((impl_owner, nesting_owner)) =
-                    impl_owner(node, parsed_file, namespace(context), local_type_keys)
-                else {
+                let Some((impl_owner, nesting_owner)) = impl_owner(
+                    node,
+                    parsed_file,
+                    namespace(context),
+                    local_type_keys,
+                    use_aliases,
+                ) else {
                     return;
                 };
                 visit_item_list(
@@ -204,6 +253,7 @@ fn visit_item(
                     &context.impl_like(nesting_owner, impl_owner),
                     symbols,
                     local_type_keys,
+                    use_aliases,
                 );
             }
         }
@@ -277,8 +327,8 @@ fn collect_local_type_keys(
     node: Node<'_>,
     parsed_file: &ParsedFile,
     context: &ExtractionContext,
-) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
+) -> TypeOwners {
+    let mut keys = BTreeMap::new();
     collect_local_type_keys_into(node, parsed_file, context, &mut keys);
     keys
 }
@@ -287,7 +337,7 @@ fn collect_local_type_keys_into(
     node: Node<'_>,
     parsed_file: &ParsedFile,
     context: &ExtractionContext,
-    keys: &mut BTreeSet<String>,
+    keys: &mut TypeOwners,
 ) {
     let mut cursor = node.walk();
 
@@ -301,14 +351,21 @@ fn collect_local_type_keys_into(
                     collect_local_type_keys_into(
                         body,
                         parsed_file,
-                        &context.module(module_key, &name),
+                        &context.module(
+                            leshy_core::SymbolId::new(parsed_file.file_id, &module_key),
+                            &name,
+                        ),
                         keys,
                     );
                 }
             }
             "struct_item" | "enum_item" | "union_item" | "trait_item" | "type_item" => {
                 if let Some(name) = node_name(child, parsed_file) {
-                    keys.insert(format!("type:{}", join_path(namespace(context), &name)));
+                    let stable_key = format!("type:{}", join_path(namespace(context), &name));
+                    keys.insert(
+                        stable_key.clone(),
+                        leshy_core::SymbolId::new(parsed_file.file_id, &stable_key),
+                    );
                 }
             }
             _ => {}
@@ -367,7 +424,8 @@ fn impl_owner(
     node: Node<'_>,
     parsed_file: &ParsedFile,
     namespace: &[String],
-    local_type_keys: &BTreeSet<String>,
+    local_type_keys: &TypeOwners,
+    use_aliases: &UseAliases,
 ) -> Option<(String, NestingOwner)> {
     let type_node = node.child_by_field_name("type")?;
     let target = canonicalize_type_like_target(
@@ -376,10 +434,10 @@ fn impl_owner(
             .ok()?,
         namespace,
         local_type_keys,
+        use_aliases,
     );
     let nesting_owner = target
-        .local_owner_key
-        .clone()
+        .local_owner
         .map(NestingOwner::Symbol)
         .unwrap_or(NestingOwner::File);
 
@@ -390,6 +448,7 @@ fn impl_owner(
                 .ok()?,
             namespace,
             local_type_keys,
+            use_aliases,
         );
         Some((
             format!("{} for {}", trait_name.stable_target, target.stable_target),
@@ -417,11 +476,12 @@ fn stable_owner_name(stable_key: &str) -> String {
 fn owner(context: &ExtractionContext, file_id: leshy_core::FileId) -> SymbolOwner {
     match &context.owner {
         NestingOwner::File => SymbolOwner::File(file_id),
-        NestingOwner::Symbol(stable_key) => {
-            SymbolOwner::Symbol(leshy_core::SymbolId::new(file_id, stable_key))
-        }
+        NestingOwner::Symbol(symbol_id) => SymbolOwner::Symbol(*symbol_id),
     }
 }
+
+type TypeOwners = BTreeMap<String, leshy_core::SymbolId>;
+type UseAliases = BTreeMap<String, BTreeMap<String, String>>;
 
 fn compact_type_name(raw: &str) -> String {
     raw.chars().filter(|ch| !ch.is_whitespace()).collect()
@@ -430,49 +490,50 @@ fn compact_type_name(raw: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CanonicalTypeTarget {
     stable_target: String,
-    local_owner_key: Option<String>,
+    local_owner: Option<leshy_core::SymbolId>,
 }
 
 fn canonicalize_type_like_target(
     raw: &str,
     namespace: &[String],
-    local_type_keys: &BTreeSet<String>,
+    local_type_keys: &TypeOwners,
+    use_aliases: &UseAliases,
 ) -> CanonicalTypeTarget {
     let compact = compact_type_name(raw);
     let Some((path_prefix, suffix)) = split_path_prefix_and_suffix(&compact) else {
         return CanonicalTypeTarget {
             stable_target: compact,
-            local_owner_key: None,
+            local_owner: None,
         };
     };
 
-    let resolved = resolve_local_path(path_prefix, namespace, local_type_keys);
-    let stable_prefix = resolved
-        .stable_prefix
+    let resolved_path = resolve_imported_path(path_prefix, namespace, use_aliases)
         .unwrap_or_else(|| path_prefix.to_string());
+    let resolved = resolve_local_path(&resolved_path, namespace, local_type_keys);
+    let stable_prefix = resolved.stable_prefix.unwrap_or(resolved_path);
 
     CanonicalTypeTarget {
         stable_target: format!("{stable_prefix}{suffix}"),
-        local_owner_key: resolved.local_owner_path.map(|path| format!("type:{path}")),
+        local_owner: resolved.local_owner,
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResolvedLocalPath {
     stable_prefix: Option<String>,
-    local_owner_path: Option<String>,
+    local_owner: Option<leshy_core::SymbolId>,
 }
 
 fn resolve_local_path(
     path_prefix: &str,
     namespace: &[String],
-    local_type_keys: &BTreeSet<String>,
+    local_type_keys: &TypeOwners,
 ) -> ResolvedLocalPath {
     let segments: Vec<&str> = path_prefix.split("::").collect();
     if segments.is_empty() || segments.iter().any(|segment| segment.is_empty()) {
         return ResolvedLocalPath {
             stable_prefix: None,
-            local_owner_path: None,
+            local_owner: None,
         };
     }
 
@@ -480,34 +541,30 @@ fn resolve_local_path(
         let path = explicit.join("::");
         return ResolvedLocalPath {
             stable_prefix: Some(path.clone()),
-            local_owner_path: local_type_keys
-                .contains(&format!("type:{path}"))
-                .then_some(path),
+            local_owner: local_type_keys.get(&format!("type:{path}")).copied(),
         };
     }
 
     let relative = join_candidate(namespace, &segments);
     let rooted = segments.join("::");
-    let relative_is_local = local_type_keys.contains(&format!("type:{relative}"));
-    let rooted_is_local = local_type_keys.contains(&format!("type:{rooted}"));
 
-    if relative_is_local {
+    if let Some(owner) = local_type_keys.get(&format!("type:{relative}")) {
         return ResolvedLocalPath {
             stable_prefix: Some(relative.clone()),
-            local_owner_path: Some(relative),
+            local_owner: Some(*owner),
         };
     }
 
-    if rooted_is_local {
+    if let Some(owner) = local_type_keys.get(&format!("type:{rooted}")) {
         return ResolvedLocalPath {
             stable_prefix: Some(rooted.clone()),
-            local_owner_path: Some(rooted),
+            local_owner: Some(*owner),
         };
     }
 
     ResolvedLocalPath {
         stable_prefix: None,
-        local_owner_path: None,
+        local_owner: None,
     }
 }
 
@@ -583,6 +640,258 @@ fn split_path_prefix_and_suffix(compact: &str) -> Option<(&str, &str)> {
     }
 
     Some((compact, ""))
+}
+
+fn collect_repository_type_keys(parsed_files: &[&ParsedFile]) -> TypeOwners {
+    let mut keys = BTreeMap::new();
+
+    for parsed_file in parsed_files {
+        let context = ExtractionContext::file(parsed_file);
+        collect_local_type_keys_into(
+            parsed_file.tree.root_node(),
+            parsed_file,
+            &context,
+            &mut keys,
+        );
+    }
+
+    keys
+}
+
+fn file_namespace(parsed_file: &ParsedFile) -> Vec<String> {
+    let path = parsed_file.relative_path.as_str();
+    let trimmed = path.strip_prefix("src/").unwrap_or(path);
+    let mut segments: Vec<String> = trimmed.split('/').map(ToString::to_string).collect();
+
+    let Some(last) = segments.pop() else {
+        return Vec::new();
+    };
+
+    match last.as_str() {
+        "lib.rs" | "main.rs" => segments,
+        "mod.rs" => segments,
+        _ => {
+            if let Some(stem) = last.strip_suffix(".rs") {
+                segments.push(stem.to_string());
+            }
+            segments
+        }
+    }
+}
+
+fn collect_use_aliases(parsed_file: &ParsedFile, context: &ExtractionContext) -> UseAliases {
+    let mut aliases = BTreeMap::new();
+    collect_use_aliases_into(
+        parsed_file.tree.root_node(),
+        parsed_file,
+        context,
+        &mut aliases,
+    );
+    aliases
+}
+
+fn collect_use_aliases_into(
+    node: Node<'_>,
+    parsed_file: &ParsedFile,
+    context: &ExtractionContext,
+    aliases: &mut UseAliases,
+) {
+    let mut cursor = node.walk();
+
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "use_declaration" => {
+                let Ok(text) = child.utf8_text(parsed_file.source_text.as_bytes()) else {
+                    continue;
+                };
+                for (alias, target) in parse_use_declaration(text, namespace(context)) {
+                    aliases
+                        .entry(scope_key(namespace(context)))
+                        .or_default()
+                        .insert(alias, target);
+                }
+            }
+            "mod_item" => {
+                if let Some(name) = node_name(child, parsed_file)
+                    && let Some(body) = child.child_by_field_name("body")
+                {
+                    let module_context = ExtractionContext {
+                        namespace: extend_namespace(context, &name),
+                        owner: context.owner.clone(),
+                        member_kind: MemberKind::FileLike,
+                    };
+                    collect_use_aliases_into(body, parsed_file, &module_context, aliases);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scope_key(namespace: &[String]) -> String {
+    namespace.join("::")
+}
+
+fn resolve_imported_path(
+    path_prefix: &str,
+    namespace: &[String],
+    use_aliases: &UseAliases,
+) -> Option<String> {
+    let (first, remainder) = path_prefix
+        .split_once("::")
+        .map_or((path_prefix, None), |(head, tail)| (head, Some(tail)));
+    let scope = use_aliases.get(&scope_key(namespace))?;
+    let target = scope.get(first)?;
+
+    Some(match remainder {
+        Some(rest) => format!("{target}::{rest}"),
+        None => target.clone(),
+    })
+}
+
+fn parse_use_declaration(text: &str, namespace: &[String]) -> Vec<(String, String)> {
+    let mut declaration = text.trim();
+    declaration = declaration
+        .strip_prefix("use")
+        .unwrap_or(declaration)
+        .trim();
+    declaration = declaration.strip_suffix(';').unwrap_or(declaration).trim();
+
+    let mut aliases = Vec::new();
+    expand_use_tree("", declaration, namespace, &mut aliases);
+    aliases
+}
+
+fn expand_use_tree(
+    prefix: &str,
+    tree: &str,
+    namespace: &[String],
+    aliases: &mut Vec<(String, String)>,
+) {
+    let tree = tree.trim();
+    if tree.is_empty() {
+        return;
+    }
+
+    if let Some((group_prefix, group_items)) = split_use_group(tree) {
+        let next_prefix = join_use_prefix(prefix, group_prefix.trim_end_matches("::"));
+        for item in split_top_level(group_items, ',') {
+            expand_use_tree(&next_prefix, item, namespace, aliases);
+        }
+        return;
+    }
+
+    let (path, alias_override) = split_use_alias(tree);
+    let full_path = join_use_prefix(prefix, path);
+    let canonical_target = canonicalize_use_target(&full_path, namespace);
+
+    if canonical_target.is_empty() {
+        return;
+    }
+
+    let alias = alias_override.unwrap_or_else(|| {
+        if path == "self" {
+            canonical_target
+                .rsplit("::")
+                .next()
+                .unwrap_or(canonical_target.as_str())
+                .to_string()
+        } else {
+            path.rsplit("::").next().unwrap_or(path).to_string()
+        }
+    });
+
+    aliases.push((alias, canonical_target));
+}
+
+fn split_use_group(tree: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut group_start = None;
+
+    for (index, ch) in tree.char_indices() {
+        match ch {
+            '{' if depth == 0 => {
+                group_start = Some(index);
+                depth = 1;
+            }
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let start = group_start?;
+                    return Some((&tree[..start], &tree[start + 1..index]));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn split_top_level(text: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if ch == delimiter && depth == 0 => {
+                parts.push(text[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(text[start..].trim());
+    parts
+}
+
+fn split_use_alias(tree: &str) -> (&str, Option<String>) {
+    let mut depth = 0usize;
+
+    for (index, ch) in tree.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && tree[index..].starts_with(" as ") => {
+                return (
+                    tree[..index].trim(),
+                    Some(tree[index + 4..].trim().to_string()),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    (tree.trim(), None)
+}
+
+fn join_use_prefix(prefix: &str, suffix: &str) -> String {
+    match (prefix.is_empty(), suffix.is_empty()) {
+        (true, _) => suffix.to_string(),
+        (_, true) => prefix.to_string(),
+        (false, false) => format!("{prefix}::{suffix}"),
+    }
+}
+
+fn canonicalize_use_target(path: &str, namespace: &[String]) -> String {
+    let compact = compact_type_name(path);
+    let Some((path_prefix, _)) = split_path_prefix_and_suffix(&compact) else {
+        return compact;
+    };
+
+    let segments: Vec<&str> = path_prefix.split("::").collect();
+    if let Some(explicit) = canonicalize_explicit_prefix(&segments, namespace) {
+        explicit.join("::")
+    } else if compact == "self" {
+        namespace.join("::")
+    } else {
+        compact
+    }
 }
 
 #[cfg(test)]

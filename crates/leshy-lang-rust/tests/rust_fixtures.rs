@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use leshy_core::{SymbolKind, scan_repository};
+use leshy_core::{SymbolKind, SymbolOwner, scan_repository};
 use leshy_lang_rust::RUST_LANGUAGE_PLUGIN;
 use leshy_parser::{LanguageRegistry, ParseError, extract_symbols, parse_repository_scan};
 
@@ -44,40 +45,56 @@ fn extracts_expected_symbols_from_shared_fixture_crate() {
         FixtureCase {
             relative_path: "src/model.rs",
             expected: &[
-                ExpectedSymbol::new("RecordId", SymbolKind::Type, "type:RecordId"),
-                ExpectedSymbol::new("Record", SymbolKind::Type, "type:Record"),
-                ExpectedSymbol::new("Status", SymbolKind::Type, "type:Status"),
-                ExpectedSymbol::new("DEFAULT_NAME", SymbolKind::Constant, "const:DEFAULT_NAME"),
-                ExpectedSymbol::new("new", SymbolKind::Method, "method:Record::new"),
+                ExpectedSymbol::new("RecordId", SymbolKind::Type, "type:model::RecordId"),
+                ExpectedSymbol::new("Record", SymbolKind::Type, "type:model::Record"),
+                ExpectedSymbol::new("Status", SymbolKind::Type, "type:model::Status"),
+                ExpectedSymbol::new(
+                    "DEFAULT_NAME",
+                    SymbolKind::Constant,
+                    "const:model::DEFAULT_NAME",
+                ),
+                ExpectedSymbol::new("new", SymbolKind::Method, "method:model::Record::new"),
                 ExpectedSymbol::new(
                     "fmt",
                     SymbolKind::Method,
-                    "method:fmt::Display for RecordId::fmt",
+                    "method:std::fmt::Display for model::RecordId::fmt",
                 ),
             ],
         },
         FixtureCase {
             relative_path: "src/service/cache.rs",
             expected: &[
-                ExpectedSymbol::new("CacheEntry", SymbolKind::Type, "type:CacheEntry"),
+                ExpectedSymbol::new(
+                    "CacheEntry",
+                    SymbolKind::Type,
+                    "type:service::cache::CacheEntry",
+                ),
                 ExpectedSymbol::new(
                     "CACHE_CAPACITY",
                     SymbolKind::Constant,
-                    "const:CACHE_CAPACITY",
+                    "const:service::cache::CACHE_CAPACITY",
                 ),
-                ExpectedSymbol::new("new", SymbolKind::Method, "method:CacheEntry::new"),
+                ExpectedSymbol::new(
+                    "new",
+                    SymbolKind::Method,
+                    "method:service::cache::CacheEntry::new",
+                ),
             ],
         },
         FixtureCase {
             relative_path: "src/service/mod.rs",
             expected: &[
-                ExpectedSymbol::new("cache", SymbolKind::Module, "module:cache"),
-                ExpectedSymbol::new("Repository", SymbolKind::Type, "type:Repository"),
-                ExpectedSymbol::new("Error", SymbolKind::Type, "type:Repository::Error"),
-                ExpectedSymbol::new("load", SymbolKind::Method, "method:Repository::load"),
-                ExpectedSymbol::new("Store", SymbolKind::Type, "type:Store"),
-                ExpectedSymbol::new("new", SymbolKind::Method, "method:Store::new"),
-                ExpectedSymbol::new("fetch", SymbolKind::Method, "method:Store::fetch"),
+                ExpectedSymbol::new("cache", SymbolKind::Module, "module:service::cache"),
+                ExpectedSymbol::new("Repository", SymbolKind::Type, "type:service::Repository"),
+                ExpectedSymbol::new("Error", SymbolKind::Type, "type:service::Repository::Error"),
+                ExpectedSymbol::new(
+                    "load",
+                    SymbolKind::Method,
+                    "method:service::Repository::load",
+                ),
+                ExpectedSymbol::new("Store", SymbolKind::Type, "type:service::Store"),
+                ExpectedSymbol::new("new", SymbolKind::Method, "method:service::Store::new"),
+                ExpectedSymbol::new("fetch", SymbolKind::Method, "method:service::Store::fetch"),
             ],
         },
     ];
@@ -111,6 +128,49 @@ fn reports_syntax_errors_for_invalid_fixture_crate() {
         error,
         ParseError::SyntaxErrors { ref path, .. } if path.as_str() == "src/lib.rs"
     ));
+}
+
+#[test]
+fn resolves_cross_file_impl_targets_and_imported_type_names() {
+    let tempdir = TestDir::new();
+    tempdir.write_file(
+        "src/lib.rs",
+        "mod model;\nuse crate::model::Record;\nimpl model::Record { fn from_module() -> Self { Self } }\nimpl Record { fn from_import() -> Self { Self } }\n",
+    );
+    tempdir.write_file("src/model.rs", "pub struct Record;\n");
+
+    let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+    let scan = scan_repository(tempdir.path()).expect("crate should scan");
+    let parsed_files =
+        parse_repository_scan(tempdir.path(), &scan, &registry).expect("crate should parse");
+    let symbols = extract_symbols(&parsed_files, &registry);
+    let lib_file = parsed_files
+        .iter()
+        .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+        .expect("lib file should be parsed");
+    let model_file = parsed_files
+        .iter()
+        .find(|parsed_file| parsed_file.relative_path.as_str() == "src/model.rs")
+        .expect("model file should be parsed");
+
+    let from_module = symbols
+        .iter()
+        .find(|symbol| symbol.stable_key == "method:model::Record::from_module")
+        .expect("module-qualified impl method should exist");
+    let from_import = symbols
+        .iter()
+        .find(|symbol| symbol.stable_key == "method:model::Record::from_import")
+        .expect("import-qualified impl method should exist");
+
+    let owner = SymbolOwner::Symbol(leshy_core::SymbolId::new(
+        model_file.file_id,
+        "type:model::Record",
+    ));
+
+    assert_eq!(from_module.file_id, lib_file.file_id);
+    assert_eq!(from_import.file_id, lib_file.file_id);
+    assert_eq!(from_module.owner, owner);
+    assert_eq!(from_import.owner, owner);
 }
 
 fn assert_symbols_for_path(symbols: &[leshy_core::ExtractedSymbol], case: FixtureCase<'_>) {
@@ -230,5 +290,48 @@ impl<'a> SpanAnchor<'a> {
             line,
             column,
         }
+    }
+}
+
+struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    fn new() -> Self {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        let unique = format!(
+            "leshy-lang-rust-test-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir(&path).expect("temporary directory should be created");
+
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write_file(&self, relative_path: &str, contents: &str) {
+        let file_path = self.path.join(relative_path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).expect("parent directories should be created");
+        }
+
+        std::fs::write(file_path, contents).expect("file contents should be written");
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }

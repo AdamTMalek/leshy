@@ -646,20 +646,11 @@ impl RepositoryGraph {
                 }
             }
             SymbolOwner::Symbol(parent_symbol_id) => {
-                let parent_symbol =
-                    self.symbol(parent_symbol_id)
-                        .ok_or_else(|| GraphError::MissingEntity {
-                            entity: "symbol",
-                            id: parent_symbol_id.to_string(),
-                        })?;
-
-                if parent_symbol.file_id != symbol.file_id {
-                    return Err(GraphError::InvalidParent {
-                        child: "symbol",
-                        expected: parent_symbol.file_id.to_string(),
-                        actual: symbol.file_id.to_string(),
-                    });
-                }
+                self.symbol(parent_symbol_id)
+                    .ok_or_else(|| GraphError::MissingEntity {
+                        entity: "symbol",
+                        id: parent_symbol_id.to_string(),
+                    })?;
             }
         }
 
@@ -923,6 +914,60 @@ mod tests {
         assert_eq!(symbol.owner, extracted.owner);
         assert_eq!(symbol.stable_key, "fn:build_graph");
         assert_eq!(symbol.span, extracted.span);
+    }
+
+    #[test]
+    fn allows_symbols_to_be_defined_by_symbols_from_other_files() {
+        let mut graph = RepositoryGraph::new(repository());
+
+        let root = Directory::new(graph.repository().id, None, ".").expect("root directory");
+        graph
+            .insert_directory(root)
+            .expect("root directory should insert");
+
+        let root_id = DirectoryId::new(graph.repository().id, &RelativePath::root());
+        let src =
+            Directory::new(graph.repository().id, Some(root_id), "src").expect("src directory");
+        let src_id = src.id;
+        graph.insert_directory(src).expect("src should insert");
+
+        let lib_file = File::new(graph.repository().id, src_id, "src/lib.rs").expect("lib file");
+        let lib_file_id = lib_file.id;
+        graph.insert_file(lib_file).expect("lib file should insert");
+
+        let model_file =
+            File::new(graph.repository().id, src_id, "src/model.rs").expect("model file");
+        let model_file_id = model_file.id;
+        graph
+            .insert_file(model_file)
+            .expect("model file should insert");
+
+        let model_type = Symbol::new(
+            model_file_id,
+            SymbolOwner::File(model_file_id),
+            SymbolKind::Type,
+            "Record",
+            "type:model::Record",
+            SourceSpan::new(0, 18, SourcePosition::new(0, 0), SourcePosition::new(0, 18)),
+        )
+        .expect("type symbol should build");
+        let model_type_id = model_type.id;
+        graph
+            .insert_symbol(model_type)
+            .expect("type symbol should insert");
+
+        let method = Symbol::new(
+            lib_file_id,
+            SymbolOwner::Symbol(model_type_id),
+            SymbolKind::Method,
+            "from_module",
+            "method:model::Record::from_module",
+            SourceSpan::new(0, 35, SourcePosition::new(0, 0), SourcePosition::new(0, 35)),
+        )
+        .expect("method symbol should build");
+        graph
+            .insert_symbol(method)
+            .expect("cross-file owned method should insert");
     }
 
     fn repository() -> Repository {

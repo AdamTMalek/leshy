@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io;
@@ -107,6 +108,12 @@ pub trait LanguagePlugin: Sync {
     fn extract_symbols(&self, _parsed_file: &ParsedFile) -> Vec<ExtractedSymbol> {
         Vec::new()
     }
+    fn finalize_symbols(
+        &self,
+        _parsed_files: &[&ParsedFile],
+        _symbols_by_file: &mut BTreeMap<FileId, Vec<ExtractedSymbol>>,
+    ) {
+    }
 }
 
 #[derive(Debug)]
@@ -214,14 +221,33 @@ pub fn extract_symbols(
     parsed_files: &[ParsedFile],
     registry: &LanguageRegistry,
 ) -> Vec<ExtractedSymbol> {
-    let mut symbols = Vec::new();
+    let mut parsed_by_language: BTreeMap<LanguageId, Vec<&ParsedFile>> = BTreeMap::new();
+    let mut symbols_by_file = BTreeMap::new();
 
     for parsed_file in parsed_files {
         let Some(plugin) = registry.plugin_for_language(parsed_file.language) else {
             continue;
         };
 
-        symbols.extend(plugin.extract_symbols(parsed_file));
+        parsed_by_language
+            .entry(parsed_file.language)
+            .or_default()
+            .push(parsed_file);
+        symbols_by_file.insert(parsed_file.file_id, plugin.extract_symbols(parsed_file));
+    }
+
+    for (language, parsed_files_for_language) in parsed_by_language {
+        let Some(plugin) = registry.plugin_for_language(language) else {
+            continue;
+        };
+        plugin.finalize_symbols(&parsed_files_for_language, &mut symbols_by_file);
+    }
+
+    let mut symbols = Vec::new();
+    for parsed_file in parsed_files {
+        if let Some(file_symbols) = symbols_by_file.remove(&parsed_file.file_id) {
+            symbols.extend(file_symbols);
+        }
     }
 
     symbols

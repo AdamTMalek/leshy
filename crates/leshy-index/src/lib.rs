@@ -505,6 +505,54 @@ mod tests {
         assert_eq!(kind.owner, leshy_core::SymbolOwner::Symbol(wrapper_id));
     }
 
+    #[test]
+    fn resolves_cross_file_impl_targets_and_imported_type_names() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "mod model;\nuse crate::model::Record;\nimpl model::Record { fn from_module() -> Self { Self } }\nimpl Record { fn from_import() -> Self { Self } }\n",
+        );
+        tempdir.write_file("src/model.rs", "pub struct Record;\n");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let lib_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+            .expect("lib file should be parsed");
+        let model_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/model.rs")
+            .expect("model file should be parsed");
+        let model_type_id = leshy_core::SymbolId::new(model_file.file_id, "type:model::Record");
+
+        let from_module = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "method:model::Record::from_module",
+            ))
+            .expect("module-qualified method should exist");
+        let from_import = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "method:model::Record::from_import",
+            ))
+            .expect("import-qualified method should exist");
+
+        assert_eq!(
+            from_module.owner,
+            leshy_core::SymbolOwner::Symbol(model_type_id)
+        );
+        assert_eq!(
+            from_import.owner,
+            leshy_core::SymbolOwner::Symbol(model_type_id)
+        );
+    }
+
     struct TestDir {
         path: PathBuf,
     }
