@@ -500,15 +500,15 @@ fn canonicalize_type_like_target(
     use_aliases: &UseAliases,
 ) -> CanonicalTypeTarget {
     let compact = compact_type_name(raw);
-    let Some((path_prefix, suffix)) = split_path_prefix_and_suffix(&compact) else {
+    let Some((path_prefix, suffix)) = split_path_prefix_and_suffix(raw) else {
         return CanonicalTypeTarget {
             stable_target: compact,
             local_owner: None,
         };
     };
 
-    let resolved_path = resolve_imported_path(path_prefix, namespace, use_aliases)
-        .unwrap_or_else(|| path_prefix.to_string());
+    let resolved_path =
+        resolve_imported_path(&path_prefix, namespace, use_aliases).unwrap_or(path_prefix);
     let resolved = resolve_local_path(&resolved_path, namespace, local_type_keys);
     let stable_prefix = resolved.stable_prefix.unwrap_or(resolved_path);
 
@@ -614,17 +614,20 @@ fn join_candidate(namespace: &[String], segments: &[&str]) -> String {
     }
 }
 
-fn split_path_prefix_and_suffix(compact: &str) -> Option<(&str, &str)> {
+fn split_path_prefix_and_suffix(raw: &str) -> Option<(String, String)> {
+    let trimmed = raw.trim();
+    let compact = compact_type_name(trimmed);
+
     if compact.is_empty()
-        || compact.starts_with('&')
-        || compact.starts_with('*')
-        || compact.starts_with('(')
-        || compact.starts_with('[')
+        || trimmed.starts_with('&')
+        || trimmed.starts_with('*')
+        || trimmed.starts_with('(')
+        || trimmed.starts_with('[')
         || compact.starts_with("fn(")
         || compact.starts_with("extern\"")
         || compact.starts_with("unsafefn(")
-        || compact.starts_with('<')
-        || compact.starts_with("dyn")
+        || trimmed.starts_with('<')
+        || starts_with_dyn_keyword(trimmed)
     {
         return None;
     }
@@ -632,14 +635,16 @@ fn split_path_prefix_and_suffix(compact: &str) -> Option<(&str, &str)> {
     let mut angle_depth = 0usize;
     for (index, ch) in compact.char_indices() {
         match ch {
-            '<' if angle_depth == 0 => return Some((&compact[..index], &compact[index..])),
+            '<' if angle_depth == 0 => {
+                return Some((compact[..index].to_string(), compact[index..].to_string()));
+            }
             '<' => angle_depth += 1,
             '>' => angle_depth = angle_depth.saturating_sub(1),
             _ => {}
         }
     }
 
-    Some((compact, ""))
+    Some((compact, String::new()))
 }
 
 fn collect_repository_type_keys(parsed_files: &[&ParsedFile]) -> TypeOwners {
@@ -660,8 +665,16 @@ fn collect_repository_type_keys(parsed_files: &[&ParsedFile]) -> TypeOwners {
 
 fn file_namespace(parsed_file: &ParsedFile) -> Vec<String> {
     let path = parsed_file.relative_path.as_str();
-    let trimmed = path.strip_prefix("src/").unwrap_or(path);
-    let mut segments: Vec<String> = trimmed.split('/').map(ToString::to_string).collect();
+    let path_segments: Vec<&str> = path.split('/').collect();
+    let crate_relative_segments = path_segments
+        .iter()
+        .position(|segment| *segment == "src")
+        .map(|index| &path_segments[index + 1..])
+        .unwrap_or(&path_segments);
+    let mut segments: Vec<String> = crate_relative_segments
+        .iter()
+        .map(|segment| (*segment).to_string())
+        .collect();
 
     let Some(last) = segments.pop() else {
         return Vec::new();
@@ -677,6 +690,14 @@ fn file_namespace(parsed_file: &ParsedFile) -> Vec<String> {
             segments
         }
     }
+}
+
+fn starts_with_dyn_keyword(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("dyn") else {
+        return false;
+    };
+
+    rest.chars().next().is_some_and(char::is_whitespace)
 }
 
 fn collect_use_aliases(parsed_file: &ParsedFile, context: &ExtractionContext) -> UseAliases {
@@ -910,7 +931,7 @@ fn join_use_prefix(prefix: &str, suffix: &str) -> String {
 
 fn canonicalize_use_target(path: &str, namespace: &[String]) -> String {
     let compact = compact_type_name(path);
-    let Some((path_prefix, _)) = split_path_prefix_and_suffix(&compact) else {
+    let Some((path_prefix, _)) = split_path_prefix_and_suffix(path) else {
         return compact;
     };
 
@@ -920,7 +941,7 @@ fn canonicalize_use_target(path: &str, namespace: &[String]) -> String {
     } else if compact == "self" {
         namespace.join("::")
     } else {
-        compact
+        path_prefix
     }
 }
 
@@ -974,6 +995,85 @@ mod tests {
                 ("outer_mod".to_string(), "outer".to_string()),
                 ("Widget".to_string(), "outer::Widget".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn derives_crate_local_namespaces_from_workspace_relative_paths() {
+        let source = r#"
+pub struct Record;
+
+impl crate::Record {
+    fn from_crate() -> Self {
+        Self
+    }
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path =
+            RelativePath::new("crates/example/src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let record = symbols
+            .iter()
+            .find(|symbol| symbol.display_name == "Record")
+            .expect("type should exist");
+        let from_crate = symbols
+            .iter()
+            .find(|symbol| symbol.display_name == "from_crate")
+            .expect("method should exist");
+
+        assert_eq!(record.stable_key, "type:Record");
+        assert_eq!(from_crate.stable_key, "method:Record::from_crate");
+        assert_eq!(
+            from_crate.owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Record"))
+        );
+    }
+
+    #[test]
+    fn keeps_dyn_prefixed_identifiers_path_like_for_owner_resolution() {
+        let source = r#"
+mod dynastore {
+    pub struct Widget;
+}
+
+impl dynastore::Widget {
+    fn build() -> Self {
+        Self
+    }
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let build = symbols
+            .iter()
+            .find(|symbol| symbol.display_name == "build")
+            .expect("method should exist");
+
+        assert_eq!(build.stable_key, "method:dynastore::Widget::build");
+        assert_eq!(
+            build.owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(
+                parsed_file.file_id,
+                "type:dynastore::Widget",
+            ))
         );
     }
 

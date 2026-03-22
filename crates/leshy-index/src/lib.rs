@@ -612,6 +612,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn treats_workspace_crate_src_as_the_module_root() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "crates/example/src/lib.rs",
+            "pub struct Record;\nimpl crate::Record { fn from_crate() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "crates/example/src/lib.rs")
+            .expect("workspace crate file should be parsed");
+        let record_id = leshy_core::SymbolId::new(file.file_id, "type:Record");
+
+        let from_crate = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file.file_id,
+                "method:Record::from_crate",
+            ))
+            .expect("crate-root method should exist");
+
+        assert_eq!(from_crate.owner, leshy_core::SymbolOwner::Symbol(record_id));
+    }
+
     struct TestDir {
         path: PathBuf,
     }

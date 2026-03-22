@@ -92,6 +92,8 @@ Relationship Layer
 
 These layers are connected internally using stable IDs to allow efficient graph traversal.
 
+The stable-ID contract is specified in [docs/stable-symbol-ids.md](docs/stable-symbol-ids.md), with the Rust-specific supplement in [docs/stable-symbol-ids-rust.md](docs/stable-symbol-ids-rust.md).
+
 ---
 
 ## Project Structure
