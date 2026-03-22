@@ -41,8 +41,9 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 3. Grouped `self` entries, such as `use crate::outer::{self as outer_mod};`, refer to the group prefix itself, not to a fictitious `outer::self` path.
 4. `as` aliases must affect only the local lookup name, not the canonical target path.
 5. Import resolution must be scope-aware.
-6. Import resolution may be used for stable key canonicalization only when the target is unambiguous.
-7. If a `use` form is unsupported, the fallback must remain deterministic and must not corrupt unrelated imported targets.
+6. Relative `use` targets without an explicit `crate::`, `self::`, or `super::` prefix must be qualified to the defining module scope before they are stored as alias targets.
+7. Import resolution may be used for stable key canonicalization only when the target is unambiguous.
+8. If a `use` form is unsupported, the fallback must remain deterministic and must not corrupt unrelated imported targets.
 
 ## 4. Rust impl target rules
 

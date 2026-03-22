@@ -1347,7 +1347,7 @@ fn canonicalize_use_target(path: &str, namespace: &[String]) -> String {
     } else if compact == "self" {
         namespace.join("::")
     } else {
-        path_prefix
+        join_path(namespace, &path_prefix)
     }
 }
 
@@ -2007,6 +2007,50 @@ mod model {
             leshy_core::SymbolOwner::Symbol(SymbolId::new(
                 parsed_file.file_id,
                 "type:model::Record",
+            ))
+        );
+    }
+
+    #[test]
+    fn qualifies_relative_use_aliases_to_the_alias_scope() {
+        let source = r#"
+mod outer {
+    mod model {
+        pub struct Record;
+    }
+
+    use model::Record as Alias;
+
+    mod inner {
+        impl super::Alias {
+            fn from_relative_alias() -> Self {
+                Self
+            }
+        }
+    }
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let method = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "method:outer::model::Record::from_relative_alias")
+            .expect("relative parent-scope alias method should exist");
+
+        assert_eq!(
+            method.owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(
+                parsed_file.file_id,
+                "type:outer::model::Record",
             ))
         );
     }
