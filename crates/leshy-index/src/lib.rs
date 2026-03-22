@@ -386,6 +386,125 @@ mod tests {
         );
     }
 
+    #[test]
+    fn indexes_specialized_inherent_impl_members_without_symbol_collisions() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "struct Wrapper<T>(T);\nimpl Wrapper<u8> { const KIND: u8 = 1; fn new() -> Self { Self(0) } }\nimpl Wrapper<String> { const KIND: u8 = 2; fn new() -> Self { Self(String::new()) } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let file_id = index.parsed_files[0].file_id;
+        let wrapper_id = leshy_core::SymbolId::new(file_id, "type:Wrapper");
+
+        let new_u8 = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "method:Wrapper<u8>::new",
+            ))
+            .expect("u8 constructor should exist");
+        let new_string = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "method:Wrapper<String>::new",
+            ))
+            .expect("string constructor should exist");
+        let kind_u8 = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "const:Wrapper<u8>::KIND",
+            ))
+            .expect("u8 constant should exist");
+        let kind_string = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "const:Wrapper<String>::KIND",
+            ))
+            .expect("string constant should exist");
+
+        assert_eq!(new_u8.owner, leshy_core::SymbolOwner::Symbol(wrapper_id));
+        assert_eq!(
+            new_string.owner,
+            leshy_core::SymbolOwner::Symbol(wrapper_id)
+        );
+        assert_eq!(kind_u8.owner, leshy_core::SymbolOwner::Symbol(wrapper_id));
+        assert_eq!(
+            kind_string.owner,
+            leshy_core::SymbolOwner::Symbol(wrapper_id)
+        );
+    }
+
+    #[test]
+    fn resolves_same_crate_qualified_impl_targets_to_local_type_owners() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "trait Assoc { type Item; }\nmod outer {\n    pub struct Widget;\n    impl self::Widget { fn from_self() -> Self { Self } }\n    pub struct Wrapper<T>(pub T);\n    mod inner { impl super::Widget { const LABEL: &'static str = \"inner\"; } }\n}\nimpl crate::outer::Widget { fn from_crate() -> Self { crate::outer::Widget } }\nimpl Assoc for crate::outer::Widget { type Item = u8; }\nimpl crate::outer::Wrapper<u8> { fn from_u8() -> Self { crate::outer::Wrapper(0) } }\nimpl self::outer::Wrapper<String> { const KIND: &'static str = \"string\"; }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let file_id = index.parsed_files[0].file_id;
+        let widget_id = leshy_core::SymbolId::new(file_id, "type:outer::Widget");
+        let wrapper_id = leshy_core::SymbolId::new(file_id, "type:outer::Wrapper");
+
+        let from_self = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "method:outer::Widget::from_self",
+            ))
+            .expect("self-qualified method should exist");
+        let from_crate = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "method:outer::Widget::from_crate",
+            ))
+            .expect("crate-qualified method should exist");
+        let label = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "const:outer::Widget::LABEL",
+            ))
+            .expect("super-qualified constant should exist");
+        let assoc_item = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "type:Assoc for outer::Widget::Item",
+            ))
+            .expect("qualified associated type should exist");
+        let from_u8 = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "method:outer::Wrapper<u8>::from_u8",
+            ))
+            .expect("specialized qualified method should exist");
+        let kind = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "const:outer::Wrapper<String>::KIND",
+            ))
+            .expect("specialized qualified constant should exist");
+
+        assert_eq!(from_self.owner, leshy_core::SymbolOwner::Symbol(widget_id));
+        assert_eq!(from_crate.owner, leshy_core::SymbolOwner::Symbol(widget_id));
+        assert_eq!(label.owner, leshy_core::SymbolOwner::Symbol(widget_id));
+        assert_eq!(assoc_item.owner, leshy_core::SymbolOwner::Symbol(widget_id));
+        assert_eq!(from_u8.owner, leshy_core::SymbolOwner::Symbol(wrapper_id));
+        assert_eq!(kind.owner, leshy_core::SymbolOwner::Symbol(wrapper_id));
+    }
+
     struct TestDir {
         path: PathBuf,
     }

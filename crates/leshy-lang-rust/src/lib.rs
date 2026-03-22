@@ -370,36 +370,33 @@ fn impl_owner(
     local_type_keys: &BTreeSet<String>,
 ) -> Option<(String, NestingOwner)> {
     let type_node = node.child_by_field_name("type")?;
-    let raw_type_name = type_node
-        .utf8_text(parsed_file.source_text.as_bytes())
-        .ok()?;
-    let stable_type_name = qualify_impl_target(namespace, &compact_type_name(raw_type_name));
-    let nominal_type_key = nominal_impl_type_key(namespace, raw_type_name);
-    let nesting_owner = nominal_type_key
-        .as_ref()
-        .filter(|type_key| local_type_keys.contains(*type_key))
-        .cloned()
+    let target = canonicalize_type_like_target(
+        type_node
+            .utf8_text(parsed_file.source_text.as_bytes())
+            .ok()?,
+        namespace,
+        local_type_keys,
+    );
+    let nesting_owner = target
+        .local_owner_key
+        .clone()
         .map(NestingOwner::Symbol)
         .unwrap_or(NestingOwner::File);
 
     if let Some(trait_node) = node.child_by_field_name("trait") {
-        let trait_name = normalize_trait_name(
+        let trait_name = canonicalize_type_like_target(
             trait_node
                 .utf8_text(parsed_file.source_text.as_bytes())
                 .ok()?,
+            namespace,
+            local_type_keys,
         );
         Some((
-            format!("{trait_name} for {stable_type_name}"),
+            format!("{} for {}", trait_name.stable_target, target.stable_target),
             nesting_owner,
         ))
     } else {
-        Some((
-            nominal_type_key
-                .as_deref()
-                .map(stable_owner_name)
-                .unwrap_or_else(|| stable_type_name.clone()),
-            nesting_owner,
-        ))
+        Some((target.stable_target, nesting_owner))
     }
 }
 
@@ -426,101 +423,166 @@ fn owner(context: &ExtractionContext, file_id: leshy_core::FileId) -> SymbolOwne
     }
 }
 
-fn qualify_impl_target(namespace: &[String], type_name: &str) -> String {
-    if type_name.contains("::")
-        || namespace.is_empty()
-        || type_name == "Self"
-        || !is_path_like_type_name(type_name)
-    {
-        type_name.to_string()
-    } else {
-        format!("{}::{type_name}", namespace.join("::"))
-    }
-}
-
-fn normalize_trait_name(raw: &str) -> String {
-    raw.chars().filter(|ch| !ch.is_whitespace()).collect()
-}
-
 fn compact_type_name(raw: &str) -> String {
     raw.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
-fn nominal_impl_type_key(namespace: &[String], raw: &str) -> Option<String> {
-    let collapsed = compact_type_name(raw);
-    let mut trimmed = collapsed.as_str();
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CanonicalTypeTarget {
+    stable_target: String,
+    local_owner_key: Option<String>,
+}
 
-    loop {
-        if let Some(rest) = trimmed.strip_prefix('&') {
-            trimmed = rest;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("*const") {
-            trimmed = rest;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("*mut") {
-            trimmed = rest;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("mut") {
-            trimmed = rest;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("dyn") {
-            trimmed = rest;
-            continue;
-        }
-        break;
+fn canonicalize_type_like_target(
+    raw: &str,
+    namespace: &[String],
+    local_type_keys: &BTreeSet<String>,
+) -> CanonicalTypeTarget {
+    let compact = compact_type_name(raw);
+    let Some((path_prefix, suffix)) = split_path_prefix_and_suffix(&compact) else {
+        return CanonicalTypeTarget {
+            stable_target: compact,
+            local_owner_key: None,
+        };
+    };
+
+    let resolved = resolve_local_path(path_prefix, namespace, local_type_keys);
+    let stable_prefix = resolved
+        .stable_prefix
+        .unwrap_or_else(|| path_prefix.to_string());
+
+    CanonicalTypeTarget {
+        stable_target: format!("{stable_prefix}{suffix}"),
+        local_owner_key: resolved.local_owner_path.map(|path| format!("type:{path}")),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedLocalPath {
+    stable_prefix: Option<String>,
+    local_owner_path: Option<String>,
+}
+
+fn resolve_local_path(
+    path_prefix: &str,
+    namespace: &[String],
+    local_type_keys: &BTreeSet<String>,
+) -> ResolvedLocalPath {
+    let segments: Vec<&str> = path_prefix.split("::").collect();
+    if segments.is_empty() || segments.iter().any(|segment| segment.is_empty()) {
+        return ResolvedLocalPath {
+            stable_prefix: None,
+            local_owner_path: None,
+        };
     }
 
-    if trimmed.is_empty()
-        || trimmed.starts_with('(')
-        || trimmed.starts_with('[')
-        || trimmed.starts_with("fn(")
+    if let Some(explicit) = canonicalize_explicit_prefix(&segments, namespace) {
+        let path = explicit.join("::");
+        return ResolvedLocalPath {
+            stable_prefix: Some(path.clone()),
+            local_owner_path: local_type_keys
+                .contains(&format!("type:{path}"))
+                .then_some(path),
+        };
+    }
+
+    let relative = join_candidate(namespace, &segments);
+    let rooted = segments.join("::");
+    let relative_is_local = local_type_keys.contains(&format!("type:{relative}"));
+    let rooted_is_local = local_type_keys.contains(&format!("type:{rooted}"));
+
+    if relative_is_local {
+        return ResolvedLocalPath {
+            stable_prefix: Some(relative.clone()),
+            local_owner_path: Some(relative),
+        };
+    }
+
+    if rooted_is_local {
+        return ResolvedLocalPath {
+            stable_prefix: Some(rooted.clone()),
+            local_owner_path: Some(rooted),
+        };
+    }
+
+    ResolvedLocalPath {
+        stable_prefix: None,
+        local_owner_path: None,
+    }
+}
+
+fn canonicalize_explicit_prefix(segments: &[&str], namespace: &[String]) -> Option<Vec<String>> {
+    let mut index = 0usize;
+    let mut resolved = if segments.first().copied() == Some("crate") {
+        index = 1;
+        Vec::new()
+    } else if segments.first().copied() == Some("self") {
+        index = 1;
+        namespace.to_vec()
+    } else if segments.first().copied() == Some("super") {
+        namespace.to_vec()
+    } else {
+        return None;
+    };
+
+    while segments.get(index).copied() == Some("super") {
+        resolved.pop()?;
+        index += 1;
+    }
+
+    while segments.get(index).copied() == Some("self") {
+        index += 1;
+    }
+
+    if index >= segments.len() {
+        return None;
+    }
+
+    resolved.extend(
+        segments[index..]
+            .iter()
+            .map(|segment| (*segment).to_string()),
+    );
+    Some(resolved)
+}
+
+fn join_candidate(namespace: &[String], segments: &[&str]) -> String {
+    if namespace.is_empty() {
+        segments.join("::")
+    } else {
+        let mut joined = namespace.join("::");
+        joined.push_str("::");
+        joined.push_str(&segments.join("::"));
+        joined
+    }
+}
+
+fn split_path_prefix_and_suffix(compact: &str) -> Option<(&str, &str)> {
+    if compact.is_empty()
+        || compact.starts_with('&')
+        || compact.starts_with('*')
+        || compact.starts_with('(')
+        || compact.starts_with('[')
+        || compact.starts_with("fn(")
+        || compact.starts_with("extern\"")
+        || compact.starts_with("unsafefn(")
+        || compact.starts_with('<')
+        || compact.starts_with("dyn")
     {
         return None;
     }
 
-    let mut normalized = String::new();
     let mut angle_depth = 0usize;
-    let mut chars = trimmed.chars().peekable();
-
-    while let Some(ch) = chars.next() {
+    for (index, ch) in compact.char_indices() {
         match ch {
+            '<' if angle_depth == 0 => return Some((&compact[..index], &compact[index..])),
             '<' => angle_depth += 1,
             '>' => angle_depth = angle_depth.saturating_sub(1),
-            '\'' if angle_depth == 0 => {
-                while let Some(next) = chars.peek() {
-                    if next.is_alphanumeric() || *next == '_' {
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-            }
-            _ if angle_depth == 0 => normalized.push(ch),
             _ => {}
         }
     }
 
-    let normalized = normalized.trim_matches(':');
-    if normalized.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "type:{}",
-        qualify_impl_target(namespace, normalized)
-    ))
-}
-
-fn is_path_like_type_name(type_name: &str) -> bool {
-    !(type_name.starts_with('(')
-        || type_name.starts_with('[')
-        || type_name.starts_with("fn(")
-        || type_name.starts_with("extern\"")
-        || type_name.starts_with("unsafefn("))
+    Some((compact, ""))
 }
 
 #[cfg(test)]
@@ -705,7 +767,7 @@ impl Write for Stream {
     }
 
     #[test]
-    fn normalizes_generic_impl_targets_for_method_ids_and_owners() {
+    fn preserves_generic_impl_targets_in_method_ids_and_local_owners() {
         let source = r#"
 struct Wrapper<T>(T);
 
@@ -732,9 +794,77 @@ impl<T> Wrapper<T> {
             .expect("method should exist");
 
         assert_eq!(method.kind, SymbolKind::Method);
-        assert_eq!(method.stable_key, "method:Wrapper::into_inner");
+        assert_eq!(method.stable_key, "method:Wrapper<T>::into_inner");
         assert_eq!(
             method.owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
+        );
+    }
+
+    #[test]
+    fn preserves_concrete_inherent_impl_targets_in_member_ids() {
+        let source = r#"
+struct Wrapper<T>(T);
+
+impl Wrapper<u8> {
+    const KIND: u8 = 1;
+
+    fn new() -> Self {
+        Self(0)
+    }
+}
+
+impl Wrapper<String> {
+    const KIND: u8 = 2;
+
+    fn new() -> Self {
+        Self(String::new())
+    }
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let new_methods: Vec<&leshy_core::ExtractedSymbol> = symbols
+            .iter()
+            .filter(|symbol| symbol.display_name == "new" && symbol.kind == SymbolKind::Method)
+            .collect();
+        let kind_constants: Vec<&leshy_core::ExtractedSymbol> = symbols
+            .iter()
+            .filter(|symbol| symbol.display_name == "KIND" && symbol.kind == SymbolKind::Constant)
+            .collect();
+
+        assert_eq!(new_methods.len(), 2);
+        assert_eq!(new_methods[0].stable_key, "method:Wrapper<u8>::new");
+        assert_eq!(new_methods[1].stable_key, "method:Wrapper<String>::new");
+        assert_ne!(new_methods[0].id, new_methods[1].id);
+        assert_eq!(
+            new_methods[0].owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
+        );
+        assert_eq!(
+            new_methods[1].owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
+        );
+
+        assert_eq!(kind_constants.len(), 2);
+        assert_eq!(kind_constants[0].stable_key, "const:Wrapper<u8>::KIND");
+        assert_eq!(kind_constants[1].stable_key, "const:Wrapper<String>::KIND");
+        assert_ne!(kind_constants[0].id, kind_constants[1].id);
+        assert_eq!(
+            kind_constants[0].owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
+        );
+        assert_eq!(
+            kind_constants[1].owner,
             leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
         );
     }
@@ -791,6 +921,137 @@ impl Marker for Wrapper<String> {
             mark_methods[2].owner,
             leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
         );
+    }
+
+    #[test]
+    fn canonicalizes_same_crate_qualified_impl_targets() {
+        let source = r#"
+trait Assoc {
+    type Item;
+}
+
+mod outer {
+    pub struct Widget;
+
+    impl self::Widget {
+        fn from_self() -> Self {
+            Self
+        }
+    }
+
+    mod inner {
+        impl super::Widget {
+            const LABEL: &'static str = "inner";
+        }
+    }
+}
+
+impl crate::outer::Widget {
+    fn from_crate() -> Self {
+        crate::outer::Widget
+    }
+}
+
+impl Assoc for crate::outer::Widget {
+    type Item = u8;
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let from_self = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "method:outer::Widget::from_self")
+            .expect("self-qualified method should exist");
+        let from_crate = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "method:outer::Widget::from_crate")
+            .expect("crate-qualified method should exist");
+        let label = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "const:outer::Widget::LABEL")
+            .expect("super-qualified constant should exist");
+        let assoc_item = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "type:Assoc for outer::Widget::Item")
+            .expect("crate-qualified associated type should exist");
+
+        let widget_owner = leshy_core::SymbolOwner::Symbol(SymbolId::new(
+            parsed_file.file_id,
+            "type:outer::Widget",
+        ));
+
+        assert_eq!(from_self.owner, widget_owner);
+        assert_eq!(from_crate.owner, widget_owner);
+        assert_eq!(label.owner, widget_owner);
+        assert_eq!(assoc_item.owner, widget_owner);
+    }
+
+    #[test]
+    fn canonicalizes_specialized_same_crate_impl_targets() {
+        let source = r#"
+trait Assoc {
+    type Item;
+}
+
+mod outer {
+    pub struct Wrapper<T>(pub T);
+}
+
+impl crate::outer::Wrapper<u8> {
+    fn from_u8() -> Self {
+        crate::outer::Wrapper(0)
+    }
+}
+
+impl self::outer::Wrapper<String> {
+    const KIND: &'static str = "string";
+}
+
+impl Assoc for crate::outer::Wrapper<u8> {
+    type Item = u8;
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let from_u8 = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "method:outer::Wrapper<u8>::from_u8")
+            .expect("specialized method should exist");
+        let kind = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "const:outer::Wrapper<String>::KIND")
+            .expect("specialized constant should exist");
+        let assoc_item = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "type:Assoc for outer::Wrapper<u8>::Item")
+            .expect("specialized associated type should exist");
+
+        let wrapper_owner = leshy_core::SymbolOwner::Symbol(SymbolId::new(
+            parsed_file.file_id,
+            "type:outer::Wrapper",
+        ));
+
+        assert_eq!(from_u8.owner, wrapper_owner);
+        assert_eq!(kind.owner, wrapper_owner);
+        assert_eq!(assoc_item.owner, wrapper_owner);
     }
 
     #[test]
