@@ -195,10 +195,13 @@ impl SourceSpan {
 /// A language-level symbol extracted from parsed source code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtractedSymbol {
+    pub id: SymbolId,
     pub file_id: FileId,
+    pub owner: SymbolOwner,
     pub relative_path: RelativePath,
     pub kind: SymbolKind,
     pub display_name: String,
+    pub stable_key: String,
     pub span: SourceSpan,
 }
 
@@ -206,19 +209,26 @@ impl ExtractedSymbol {
     /// Creates an extracted symbol record.
     pub fn new(
         file_id: FileId,
+        owner: SymbolOwner,
         relative_path: RelativePath,
         kind: SymbolKind,
         display_name: impl Into<String>,
+        stable_key: impl Into<String>,
         span: SourceSpan,
     ) -> Result<Self, GraphError> {
         let display_name = display_name.into();
+        let stable_key = stable_key.into();
         check_name_is_not_blank("symbol", &display_name)?;
+        check_key_is_not_blank("symbol", &stable_key)?;
 
         Ok(Self {
+            id: SymbolId::new(file_id, &stable_key),
             file_id,
+            owner,
             relative_path,
             kind,
             display_name,
+            stable_key,
             span,
         })
     }
@@ -249,6 +259,7 @@ pub struct Symbol {
     pub kind: SymbolKind,
     pub display_name: String,
     pub stable_key: String,
+    pub span: SourceSpan,
 }
 
 impl Symbol {
@@ -259,6 +270,7 @@ impl Symbol {
         kind: SymbolKind,
         display_name: impl Into<String>,
         stable_key: impl Into<String>,
+        span: SourceSpan,
     ) -> Result<Self, GraphError> {
         let display_name = display_name.into();
         let stable_key = stable_key.into();
@@ -273,7 +285,23 @@ impl Symbol {
             kind,
             display_name,
             stable_key,
+            span,
         })
+    }
+}
+
+impl TryFrom<&ExtractedSymbol> for Symbol {
+    type Error = GraphError;
+
+    fn try_from(symbol: &ExtractedSymbol) -> Result<Self, Self::Error> {
+        Self::new(
+            symbol.file_id,
+            symbol.owner,
+            symbol.kind,
+            symbol.display_name.clone(),
+            symbol.stable_key.clone(),
+            symbol.span,
+        )
     }
 }
 
@@ -714,7 +742,7 @@ fn check_name_is_not_blank(entity: &'static str, value: &str) -> Result<(), Grap
 mod tests {
     use super::{
         Directory, EntityId, File, Relationship, RelationshipKind, Repository, RepositoryGraph,
-        Symbol, SymbolKind, SymbolOwner,
+        SourcePosition, SourceSpan, Symbol, SymbolKind, SymbolOwner,
     };
     use crate::{DirectoryId, FileId, GraphError, RelativePath, RepositoryId, SymbolId};
     use std::path::PathBuf;
@@ -867,6 +895,36 @@ mod tests {
         assert_eq!(graph.relationships().count(), 5);
     }
 
+    #[test]
+    fn converts_extracted_symbols_into_graph_symbols() {
+        let repository_id = RepositoryId::new("repository");
+        let relative_path = RelativePath::new("src/lib.rs").expect("path should normalize");
+        let file_id = FileId::new(repository_id, &relative_path);
+        let extracted = crate::ExtractedSymbol::new(
+            file_id,
+            SymbolOwner::File(file_id),
+            relative_path,
+            SymbolKind::Function,
+            "build_graph",
+            "fn:build_graph",
+            SourceSpan::new(
+                10,
+                25,
+                SourcePosition::new(3, 0),
+                SourcePosition::new(3, 15),
+            ),
+        )
+        .expect("symbol should build");
+
+        let symbol = Symbol::try_from(&extracted).expect("symbol conversion should succeed");
+
+        assert_eq!(symbol.id, extracted.id);
+        assert_eq!(symbol.file_id, extracted.file_id);
+        assert_eq!(symbol.owner, extracted.owner);
+        assert_eq!(symbol.stable_key, "fn:build_graph");
+        assert_eq!(symbol.span, extracted.span);
+    }
+
     fn repository() -> Repository {
         Repository::new("repository", "leshy", PathBuf::from("C:/repos/leshy"))
             .expect("repository should build")
@@ -901,6 +959,7 @@ mod tests {
             SymbolKind::Module,
             "crate",
             "module:crate",
+            SourceSpan::new(0, 5, SourcePosition::new(0, 0), SourcePosition::new(0, 5)),
         )
         .expect("module");
         graph
@@ -913,6 +972,7 @@ mod tests {
             SymbolKind::Function,
             "build_graph",
             "fn:crate::build_graph",
+            SourceSpan::new(6, 17, SourcePosition::new(1, 0), SourcePosition::new(1, 11)),
         )
         .expect("function");
         graph

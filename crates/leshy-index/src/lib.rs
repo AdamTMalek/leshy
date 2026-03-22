@@ -4,7 +4,7 @@ use std::path::Path;
 
 use leshy_core::{
     DirectoryId, ExtractedSymbol, FileId, GraphError, RepositoryGraph, RepositoryScan, ScanError,
-    scan_repository,
+    Symbol, SymbolId, scan_repository,
 };
 use leshy_parser::{
     LanguageRegistry, ParseError, ParsedFile, extract_symbols, parse_repository_scan,
@@ -36,6 +36,10 @@ pub enum IndexError {
         file_id: FileId,
         source: GraphError,
     },
+    InsertSymbol {
+        symbol_id: SymbolId,
+        source: GraphError,
+    },
 }
 
 impl Display for IndexError {
@@ -52,6 +56,9 @@ impl Display for IndexError {
             Self::InsertFile { file_id, source } => {
                 write!(f, "failed to populate file `{file_id}`: {source}")
             }
+            Self::InsertSymbol { symbol_id, source } => {
+                write!(f, "failed to populate symbol `{symbol_id}`: {source}")
+            }
         }
     }
 }
@@ -63,6 +70,7 @@ impl Error for IndexError {
             Self::Parse { source } => Some(source),
             Self::InsertDirectory { source, .. } => Some(source),
             Self::InsertFile { source, .. } => Some(source),
+            Self::InsertSymbol { source, .. } => Some(source),
         }
     }
 }
@@ -76,7 +84,7 @@ pub fn index_repository(
     let parsed_files = parse_repository_scan(root, &scan, registry)
         .map_err(|source| IndexError::Parse { source })?;
     let symbols = extract_symbols(&parsed_files, registry);
-    let graph = build_graph_from_scan(&scan)?;
+    let graph = build_graph_from_scan(&scan, &symbols)?;
 
     Ok(RepositoryIndex {
         scan,
@@ -86,7 +94,10 @@ pub fn index_repository(
     })
 }
 
-fn build_graph_from_scan(scan: &RepositoryScan) -> Result<RepositoryGraph, IndexError> {
+fn build_graph_from_scan(
+    scan: &RepositoryScan,
+    symbols: &[ExtractedSymbol],
+) -> Result<RepositoryGraph, IndexError> {
     let mut graph = RepositoryGraph::new(scan.repository.clone());
 
     for directory in &scan.directories {
@@ -107,6 +118,19 @@ fn build_graph_from_scan(scan: &RepositoryScan) -> Result<RepositoryGraph, Index
             })?;
     }
 
+    for extracted in symbols {
+        let symbol = Symbol::try_from(extracted).map_err(|source| IndexError::InsertSymbol {
+            symbol_id: extracted.id,
+            source,
+        })?;
+        graph
+            .insert_symbol(symbol)
+            .map_err(|source| IndexError::InsertSymbol {
+                symbol_id: extracted.id,
+                source,
+            })?;
+    }
+
     Ok(graph)
 }
 
@@ -120,7 +144,7 @@ mod tests {
     use leshy_parser::{LanguageId, LanguageRegistry, ParseError};
 
     use super::{IndexError, build_graph_from_scan, index_repository};
-    use leshy_core::{DirectoryId, RelativePath, ScanError};
+    use leshy_core::{DirectoryId, RelativePath, ScanError, SourcePosition, SourceSpan};
 
     #[test]
     fn indexes_repository_end_to_end() {
@@ -137,9 +161,20 @@ mod tests {
         assert_eq!(index.symbols.len(), 1);
         assert_eq!(index.parsed_files[0].language, LanguageId::new("rust"));
         assert_eq!(index.symbols[0].display_name, "library");
+        assert_eq!(index.symbols[0].stable_key, "fn:library");
         assert_eq!(index.graph.directories().count(), 3);
         assert_eq!(index.graph.files().count(), 2);
-        assert_eq!(index.graph.relationships().count(), 5);
+        assert_eq!(index.graph.symbols().count(), 1);
+        assert_eq!(
+            index
+                .graph
+                .symbols()
+                .next()
+                .expect("graph symbol")
+                .stable_key,
+            "fn:library"
+        );
+        assert_eq!(index.graph.relationships().count(), 6);
         assert_eq!(index.graph.repository().id, index.scan.repository.id);
     }
 
@@ -184,7 +219,7 @@ mod tests {
         scan.directories[1].parent_id = None;
         let failing_directory_id = scan.directories[1].id;
 
-        let error = build_graph_from_scan(&scan).expect_err("graph population should fail");
+        let error = build_graph_from_scan(&scan, &[]).expect_err("graph population should fail");
 
         assert!(matches!(
             error,
@@ -204,7 +239,7 @@ mod tests {
         );
         let failing_file_id = scan.files[0].id;
 
-        let error = build_graph_from_scan(&scan).expect_err("graph population should fail");
+        let error = build_graph_from_scan(&scan, &[]).expect_err("graph population should fail");
 
         assert!(matches!(
             error,
@@ -224,6 +259,46 @@ mod tests {
         assert!(index.symbols.is_empty());
         assert_eq!(index.scan.files.len(), 1);
         assert_eq!(index.graph.files().count(), 1);
+    }
+
+    #[test]
+    fn populates_graph_symbols_with_definition_spans() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let symbol = index.graph.symbols().next().expect("symbol should exist");
+
+        assert_eq!(symbol.id, index.symbols[0].id);
+        assert_eq!(symbol.display_name, "library");
+        assert_eq!(
+            symbol.span,
+            SourceSpan::new(0, 19, SourcePosition::new(0, 0), SourcePosition::new(0, 19))
+        );
+    }
+
+    #[test]
+    fn preserves_nested_symbol_ownership_in_the_graph() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "mod nested { struct Widget; impl Widget { fn new() -> Self { Self } } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let file_id = index.parsed_files[0].file_id;
+        let widget_id = leshy_core::SymbolId::new(file_id, "type:nested::Widget");
+        let new_symbol = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                file_id,
+                "method:nested::Widget::new",
+            ))
+            .expect("method symbol should exist");
+
+        assert_eq!(new_symbol.owner, leshy_core::SymbolOwner::Symbol(widget_id));
     }
 
     struct TestDir {

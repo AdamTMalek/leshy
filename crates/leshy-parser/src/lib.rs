@@ -403,9 +403,11 @@ mod tests {
             vec![
                 ExtractedSymbol::new(
                     parsed_file.file_id,
+                    leshy_core::SymbolOwner::File(parsed_file.file_id),
                     parsed_file.relative_path.clone(),
                     SymbolKind::Function,
                     "sample_symbol",
+                    "fn:sample_symbol",
                     SourceSpan::new(
                         0,
                         parsed_file.source_text.len(),

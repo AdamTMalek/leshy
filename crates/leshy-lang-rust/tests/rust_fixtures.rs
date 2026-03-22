@@ -31,41 +31,53 @@ fn extracts_expected_symbols_from_shared_fixture_crate() {
         FixtureCase {
             relative_path: "src/lib.rs",
             expected: &[
-                ExpectedSymbol::new("model", SymbolKind::Module),
-                ExpectedSymbol::new("service", SymbolKind::Module),
-                ExpectedSymbol::new("DEFAULT_BATCH_SIZE", SymbolKind::Constant),
-                ExpectedSymbol::new("bootstrap", SymbolKind::Function),
+                ExpectedSymbol::new("model", SymbolKind::Module, "module:model"),
+                ExpectedSymbol::new("service", SymbolKind::Module, "module:service"),
+                ExpectedSymbol::new(
+                    "DEFAULT_BATCH_SIZE",
+                    SymbolKind::Constant,
+                    "const:DEFAULT_BATCH_SIZE",
+                ),
+                ExpectedSymbol::new("bootstrap", SymbolKind::Function, "fn:bootstrap"),
             ],
         },
         FixtureCase {
             relative_path: "src/model.rs",
             expected: &[
-                ExpectedSymbol::new("RecordId", SymbolKind::Type),
-                ExpectedSymbol::new("Record", SymbolKind::Type),
-                ExpectedSymbol::new("Status", SymbolKind::Type),
-                ExpectedSymbol::new("DEFAULT_NAME", SymbolKind::Constant),
-                ExpectedSymbol::new("new", SymbolKind::Method),
-                ExpectedSymbol::new("fmt", SymbolKind::Method),
+                ExpectedSymbol::new("RecordId", SymbolKind::Type, "type:RecordId"),
+                ExpectedSymbol::new("Record", SymbolKind::Type, "type:Record"),
+                ExpectedSymbol::new("Status", SymbolKind::Type, "type:Status"),
+                ExpectedSymbol::new("DEFAULT_NAME", SymbolKind::Constant, "const:DEFAULT_NAME"),
+                ExpectedSymbol::new("new", SymbolKind::Method, "method:Record::new"),
+                ExpectedSymbol::new(
+                    "fmt",
+                    SymbolKind::Method,
+                    "method:fmt::Display for RecordId::fmt",
+                ),
             ],
         },
         FixtureCase {
             relative_path: "src/service/cache.rs",
             expected: &[
-                ExpectedSymbol::new("CacheEntry", SymbolKind::Type),
-                ExpectedSymbol::new("CACHE_CAPACITY", SymbolKind::Constant),
-                ExpectedSymbol::new("new", SymbolKind::Method),
+                ExpectedSymbol::new("CacheEntry", SymbolKind::Type, "type:CacheEntry"),
+                ExpectedSymbol::new(
+                    "CACHE_CAPACITY",
+                    SymbolKind::Constant,
+                    "const:CACHE_CAPACITY",
+                ),
+                ExpectedSymbol::new("new", SymbolKind::Method, "method:CacheEntry::new"),
             ],
         },
         FixtureCase {
             relative_path: "src/service/mod.rs",
             expected: &[
-                ExpectedSymbol::new("cache", SymbolKind::Module),
-                ExpectedSymbol::new("Repository", SymbolKind::Type),
-                ExpectedSymbol::new("Error", SymbolKind::Type),
-                ExpectedSymbol::new("load", SymbolKind::Method),
-                ExpectedSymbol::new("Store", SymbolKind::Type),
-                ExpectedSymbol::new("new", SymbolKind::Method),
-                ExpectedSymbol::new("fetch", SymbolKind::Method),
+                ExpectedSymbol::new("cache", SymbolKind::Module, "module:cache"),
+                ExpectedSymbol::new("Repository", SymbolKind::Type, "type:Repository"),
+                ExpectedSymbol::new("Error", SymbolKind::Type, "type:Repository::Error"),
+                ExpectedSymbol::new("load", SymbolKind::Method, "method:Repository::load"),
+                ExpectedSymbol::new("Store", SymbolKind::Type, "type:Store"),
+                ExpectedSymbol::new("new", SymbolKind::Method, "method:Store::new"),
+                ExpectedSymbol::new("fetch", SymbolKind::Method, "method:Store::fetch"),
             ],
         },
     ];
@@ -102,15 +114,27 @@ fn reports_syntax_errors_for_invalid_fixture_crate() {
 }
 
 fn assert_symbols_for_path(symbols: &[leshy_core::ExtractedSymbol], case: FixtureCase<'_>) {
-    let extracted: Vec<(String, SymbolKind)> = symbols
+    let extracted: Vec<(String, SymbolKind, String)> = symbols
         .iter()
         .filter(|symbol| symbol.relative_path.as_str() == case.relative_path)
-        .map(|symbol| (symbol.display_name.clone(), symbol.kind))
+        .map(|symbol| {
+            (
+                symbol.display_name.clone(),
+                symbol.kind,
+                symbol.stable_key.clone(),
+            )
+        })
         .collect();
-    let expected: Vec<(String, SymbolKind)> = case
+    let expected: Vec<(String, SymbolKind, String)> = case
         .expected
         .iter()
-        .map(|symbol| (symbol.display_name.to_string(), symbol.kind))
+        .map(|symbol| {
+            (
+                symbol.display_name.to_string(),
+                symbol.kind,
+                symbol.stable_key.to_string(),
+            )
+        })
         .collect();
 
     assert_eq!(
@@ -172,11 +196,16 @@ struct FixtureCase<'a> {
 struct ExpectedSymbol {
     display_name: &'static str,
     kind: SymbolKind,
+    stable_key: &'static str,
 }
 
 impl ExpectedSymbol {
-    const fn new(display_name: &'static str, kind: SymbolKind) -> Self {
-        Self { display_name, kind }
+    const fn new(display_name: &'static str, kind: SymbolKind, stable_key: &'static str) -> Self {
+        Self {
+            display_name,
+            kind,
+            stable_key,
+        }
     }
 }
 
