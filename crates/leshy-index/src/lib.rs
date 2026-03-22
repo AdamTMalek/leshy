@@ -118,17 +118,50 @@ fn build_graph_from_scan(
             })?;
     }
 
+    let mut pending = Vec::with_capacity(symbols.len());
     for extracted in symbols {
-        let symbol = Symbol::try_from(extracted).map_err(|source| IndexError::InsertSymbol {
-            symbol_id: extracted.id,
-            source,
-        })?;
-        graph
-            .insert_symbol(symbol)
-            .map_err(|source| IndexError::InsertSymbol {
+        pending.push(
+            Symbol::try_from(extracted).map_err(|source| IndexError::InsertSymbol {
                 symbol_id: extracted.id,
                 source,
-            })?;
+            })?,
+        );
+    }
+
+    while !pending.is_empty() {
+        let mut deferred = Vec::new();
+        let mut inserted_any = false;
+
+        for symbol in pending {
+            match graph.insert_symbol(symbol.clone()) {
+                Ok(()) => inserted_any = true,
+                Err(GraphError::MissingEntity {
+                    entity: "symbol", ..
+                }) => deferred.push(symbol),
+                Err(source) => {
+                    return Err(IndexError::InsertSymbol {
+                        symbol_id: symbol.id,
+                        source,
+                    });
+                }
+            }
+        }
+
+        if !inserted_any {
+            let symbol = deferred
+                .into_iter()
+                .next()
+                .expect("pending symbols should not be empty");
+            return Err(IndexError::InsertSymbol {
+                symbol_id: symbol.id,
+                source: GraphError::MissingEntity {
+                    entity: "symbol",
+                    id: symbol.id.to_string(),
+                },
+            });
+        }
+
+        pending = deferred;
     }
 
     Ok(graph)
@@ -299,6 +332,58 @@ mod tests {
             .expect("method symbol should exist");
 
         assert_eq!(new_symbol.owner, leshy_core::SymbolOwner::Symbol(widget_id));
+    }
+
+    #[test]
+    fn preserves_type_ownership_when_impl_appears_before_type_definition() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "impl Widget { fn new() -> Self { Self } }\nstruct Widget;\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let file_id = index.parsed_files[0].file_id;
+        let widget_id = leshy_core::SymbolId::new(file_id, "type:Widget");
+        let new_symbol = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(file_id, "method:Widget::new"))
+            .expect("method symbol should exist");
+
+        assert_eq!(new_symbol.owner, leshy_core::SymbolOwner::Symbol(widget_id));
+    }
+
+    #[test]
+    fn indexes_multiple_trait_impl_associated_types_without_symbol_collisions() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "trait A { type Item; }\ntrait B { type Item; }\nstruct Stream;\nimpl A for Stream { type Item = u8; }\nimpl B for Stream { type Item = u16; }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let file_id = index.parsed_files[0].file_id;
+
+        assert!(
+            index
+                .graph
+                .symbol(leshy_core::SymbolId::new(
+                    file_id,
+                    "type:A for Stream::Item"
+                ))
+                .is_some()
+        );
+        assert!(
+            index
+                .graph
+                .symbol(leshy_core::SymbolId::new(
+                    file_id,
+                    "type:B for Stream::Item"
+                ))
+                .is_some()
+        );
     }
 
     struct TestDir {

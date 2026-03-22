@@ -31,13 +31,17 @@ pub fn parse_source(source_text: &str) -> Result<Tree, LanguagePluginError> {
 
 pub fn extract_symbols(parsed_file: &ParsedFile) -> Vec<ExtractedSymbol> {
     let mut symbols = Vec::new();
-    let mut defined_symbols = BTreeSet::new();
+    let local_type_keys = collect_local_type_keys(
+        parsed_file.tree.root_node(),
+        parsed_file,
+        &ExtractionContext::file(),
+    );
     visit_item_list(
         parsed_file.tree.root_node(),
         parsed_file,
         &ExtractionContext::file(),
         &mut symbols,
-        &mut defined_symbols,
+        &local_type_keys,
     );
     symbols
 }
@@ -118,12 +122,12 @@ fn visit_item_list(
     parsed_file: &ParsedFile,
     context: &ExtractionContext,
     symbols: &mut Vec<ExtractedSymbol>,
-    defined_symbols: &mut BTreeSet<String>,
+    local_type_keys: &BTreeSet<String>,
 ) {
     let mut cursor = node.walk();
 
     for child in node.named_children(&mut cursor) {
-        visit_item(child, parsed_file, context, symbols, defined_symbols);
+        visit_item(child, parsed_file, context, symbols, local_type_keys);
     }
 }
 
@@ -132,7 +136,7 @@ fn visit_item(
     parsed_file: &ParsedFile,
     context: &ExtractionContext,
     symbols: &mut Vec<ExtractedSymbol>,
-    defined_symbols: &mut BTreeSet<String>,
+    local_type_keys: &BTreeSet<String>,
 ) {
     match node.kind() {
         "mod_item" => {
@@ -148,7 +152,6 @@ fn visit_item(
                 node,
                 SymbolKind::Module,
                 stable_key.clone(),
-                defined_symbols,
             );
 
             if let Some(body) = node.child_by_field_name("body") {
@@ -157,7 +160,7 @@ fn visit_item(
                     parsed_file,
                     &context.module(stable_key, &name),
                     symbols,
-                    defined_symbols,
+                    local_type_keys,
                 );
             }
         }
@@ -174,7 +177,6 @@ fn visit_item(
                 node,
                 SymbolKind::Type,
                 stable_key.clone(),
-                defined_symbols,
             );
 
             if node.kind() == "trait_item"
@@ -185,14 +187,14 @@ fn visit_item(
                     parsed_file,
                     &context.type_like(stable_key.clone(), stable_owner_name(&stable_key)),
                     symbols,
-                    defined_symbols,
+                    local_type_keys,
                 );
             }
         }
         "impl_item" => {
             if let Some(body) = node.child_by_field_name("body") {
                 let Some((impl_owner, nesting_owner)) =
-                    impl_owner(node, parsed_file, namespace(context), defined_symbols)
+                    impl_owner(node, parsed_file, namespace(context), local_type_keys)
                 else {
                     return;
                 };
@@ -201,7 +203,7 @@ fn visit_item(
                     parsed_file,
                     &context.impl_like(nesting_owner, impl_owner),
                     symbols,
-                    defined_symbols,
+                    local_type_keys,
                 );
             }
         }
@@ -217,7 +219,6 @@ fn visit_item(
                 node,
                 kind,
                 stable_key,
-                defined_symbols,
             );
         }
         "const_item" | "static_item" => {
@@ -232,7 +233,6 @@ fn visit_item(
                 node,
                 SymbolKind::Constant,
                 stable_key,
-                defined_symbols,
             );
         }
         _ => {}
@@ -246,7 +246,6 @@ fn push_symbol(
     node: Node<'_>,
     kind: SymbolKind,
     stable_key: String,
-    defined_symbols: &mut BTreeSet<String>,
 ) {
     let Some(name_node) = node.child_by_field_name("name") else {
         return;
@@ -270,8 +269,50 @@ fn push_symbol(
             SourcePosition::new(range.end_point.row, range.end_point.column),
         ),
     ) {
-        defined_symbols.insert(symbol.stable_key.clone());
         symbols.push(symbol);
+    }
+}
+
+fn collect_local_type_keys(
+    node: Node<'_>,
+    parsed_file: &ParsedFile,
+    context: &ExtractionContext,
+) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    collect_local_type_keys_into(node, parsed_file, context, &mut keys);
+    keys
+}
+
+fn collect_local_type_keys_into(
+    node: Node<'_>,
+    parsed_file: &ParsedFile,
+    context: &ExtractionContext,
+    keys: &mut BTreeSet<String>,
+) {
+    let mut cursor = node.walk();
+
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "mod_item" => {
+                if let Some(name) = node_name(child, parsed_file)
+                    && let Some(body) = child.child_by_field_name("body")
+                {
+                    let module_key = format!("module:{}", join_path(namespace(context), &name));
+                    collect_local_type_keys_into(
+                        body,
+                        parsed_file,
+                        &context.module(module_key, &name),
+                        keys,
+                    );
+                }
+            }
+            "struct_item" | "enum_item" | "union_item" | "trait_item" | "type_item" => {
+                if let Some(name) = node_name(child, parsed_file) {
+                    keys.insert(format!("type:{}", join_path(namespace(context), &name)));
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -303,7 +344,7 @@ fn node_name(node: Node<'_>, parsed_file: &ParsedFile) -> Option<String> {
 
 fn type_stable_key(node: Node<'_>, context: &ExtractionContext, name: &str) -> String {
     match (&context.member_kind, node.kind()) {
-        (MemberKind::TypeLike { stable_owner }, "associated_type") => {
+        (MemberKind::TypeLike { stable_owner }, "associated_type" | "type_item") => {
             format!("type:{stable_owner}::{name}")
         }
         _ => format!("type:{}", join_path(namespace(context), name)),
@@ -326,36 +367,39 @@ fn impl_owner(
     node: Node<'_>,
     parsed_file: &ParsedFile,
     namespace: &[String],
-    defined_symbols: &BTreeSet<String>,
+    local_type_keys: &BTreeSet<String>,
 ) -> Option<(String, NestingOwner)> {
     let type_node = node.child_by_field_name("type")?;
-    let type_name = type_node
+    let raw_type_name = type_node
         .utf8_text(parsed_file.source_text.as_bytes())
-        .ok()?
-        .split_whitespace()
-        .collect::<String>();
-    let qualified_type = if type_name.contains("::") || namespace.is_empty() || type_name == "Self"
-    {
-        type_name
-    } else {
-        format!("{}::{type_name}", namespace.join("::"))
-    };
-    let type_key = format!("type:{qualified_type}");
-    let nesting_owner = if defined_symbols.contains(&type_key) {
-        NestingOwner::Symbol(type_key)
-    } else {
-        NestingOwner::File
-    };
+        .ok()?;
+    let stable_type_name = qualify_impl_target(namespace, &compact_type_name(raw_type_name));
+    let nominal_type_key = nominal_impl_type_key(namespace, raw_type_name);
+    let nesting_owner = nominal_type_key
+        .as_ref()
+        .filter(|type_key| local_type_keys.contains(*type_key))
+        .cloned()
+        .map(NestingOwner::Symbol)
+        .unwrap_or(NestingOwner::File);
 
     if let Some(trait_node) = node.child_by_field_name("trait") {
-        let trait_name = trait_node
-            .utf8_text(parsed_file.source_text.as_bytes())
-            .ok()?
-            .split_whitespace()
-            .collect::<String>();
-        Some((format!("{trait_name} for {qualified_type}"), nesting_owner))
+        let trait_name = normalize_trait_name(
+            trait_node
+                .utf8_text(parsed_file.source_text.as_bytes())
+                .ok()?,
+        );
+        Some((
+            format!("{trait_name} for {stable_type_name}"),
+            nesting_owner,
+        ))
     } else {
-        Some((qualified_type, nesting_owner))
+        Some((
+            nominal_type_key
+                .as_deref()
+                .map(stable_owner_name)
+                .unwrap_or_else(|| stable_type_name.clone()),
+            nesting_owner,
+        ))
     }
 }
 
@@ -380,6 +424,103 @@ fn owner(context: &ExtractionContext, file_id: leshy_core::FileId) -> SymbolOwne
             SymbolOwner::Symbol(leshy_core::SymbolId::new(file_id, stable_key))
         }
     }
+}
+
+fn qualify_impl_target(namespace: &[String], type_name: &str) -> String {
+    if type_name.contains("::")
+        || namespace.is_empty()
+        || type_name == "Self"
+        || !is_path_like_type_name(type_name)
+    {
+        type_name.to_string()
+    } else {
+        format!("{}::{type_name}", namespace.join("::"))
+    }
+}
+
+fn normalize_trait_name(raw: &str) -> String {
+    raw.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn compact_type_name(raw: &str) -> String {
+    raw.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn nominal_impl_type_key(namespace: &[String], raw: &str) -> Option<String> {
+    let collapsed = compact_type_name(raw);
+    let mut trimmed = collapsed.as_str();
+
+    loop {
+        if let Some(rest) = trimmed.strip_prefix('&') {
+            trimmed = rest;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("*const") {
+            trimmed = rest;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("*mut") {
+            trimmed = rest;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("mut") {
+            trimmed = rest;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("dyn") {
+            trimmed = rest;
+            continue;
+        }
+        break;
+    }
+
+    if trimmed.is_empty()
+        || trimmed.starts_with('(')
+        || trimmed.starts_with('[')
+        || trimmed.starts_with("fn(")
+    {
+        return None;
+    }
+
+    let mut normalized = String::new();
+    let mut angle_depth = 0usize;
+    let mut chars = trimmed.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '\'' if angle_depth == 0 => {
+                while let Some(next) = chars.peek() {
+                    if next.is_alphanumeric() || *next == '_' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ if angle_depth == 0 => normalized.push(ch),
+            _ => {}
+        }
+    }
+
+    let normalized = normalized.trim_matches(':');
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "type:{}",
+        qualify_impl_target(namespace, normalized)
+    ))
+}
+
+fn is_path_like_type_name(type_name: &str) -> bool {
+    !(type_name.starts_with('(')
+        || type_name.starts_with('[')
+        || type_name.starts_with("fn(")
+        || type_name.starts_with("extern\"")
+        || type_name.starts_with("unsafefn("))
 }
 
 #[cfg(test)]
@@ -561,5 +702,147 @@ impl Write for Stream {
         assert_eq!(read_methods[2].stable_key, "method:Read for Stream::read");
         assert_eq!(read_methods[3].stable_key, "method:Write for Stream::read");
         assert_ne!(read_methods[2].id, read_methods[3].id);
+    }
+
+    #[test]
+    fn normalizes_generic_impl_targets_for_method_ids_and_owners() {
+        let source = r#"
+struct Wrapper<T>(T);
+
+impl<T> Wrapper<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let method = symbols
+            .iter()
+            .find(|symbol| symbol.display_name == "into_inner")
+            .expect("method should exist");
+
+        assert_eq!(method.kind, SymbolKind::Method);
+        assert_eq!(method.stable_key, "method:Wrapper::into_inner");
+        assert_eq!(
+            method.owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
+        );
+    }
+
+    #[test]
+    fn preserves_concrete_trait_impl_targets_in_method_ids() {
+        let source = r#"
+trait Marker {
+    fn mark(&self);
+}
+
+struct Wrapper<T>(T);
+
+impl Marker for Wrapper<u8> {
+    fn mark(&self) {}
+}
+
+impl Marker for Wrapper<String> {
+    fn mark(&self) {}
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let mark_methods: Vec<&leshy_core::ExtractedSymbol> = symbols
+            .iter()
+            .filter(|symbol| symbol.display_name == "mark" && symbol.kind == SymbolKind::Method)
+            .collect();
+
+        assert_eq!(mark_methods.len(), 3);
+        assert_eq!(mark_methods[0].stable_key, "method:Marker::mark");
+        assert_eq!(
+            mark_methods[1].stable_key,
+            "method:Marker for Wrapper<u8>::mark"
+        );
+        assert_eq!(
+            mark_methods[2].stable_key,
+            "method:Marker for Wrapper<String>::mark"
+        );
+        assert_ne!(mark_methods[1].id, mark_methods[2].id);
+        assert_eq!(
+            mark_methods[1].owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
+        );
+        assert_eq!(
+            mark_methods[2].owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Wrapper"))
+        );
+    }
+
+    #[test]
+    fn scopes_associated_type_keys_to_the_enclosing_trait_impl() {
+        let source = r#"
+trait A {
+    type Item;
+}
+
+trait B {
+    type Item;
+}
+
+struct Stream;
+
+impl A for Stream {
+    type Item = u8;
+}
+
+impl B for Stream {
+    type Item = u16;
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let associated_types: Vec<&leshy_core::ExtractedSymbol> = symbols
+            .iter()
+            .filter(|symbol| symbol.display_name == "Item" && symbol.kind == SymbolKind::Type)
+            .collect();
+
+        assert_eq!(associated_types.len(), 4);
+        assert_eq!(associated_types[0].stable_key, "type:A::Item");
+        assert_eq!(associated_types[1].stable_key, "type:B::Item");
+        assert_eq!(associated_types[2].stable_key, "type:A for Stream::Item");
+        assert_eq!(associated_types[3].stable_key, "type:B for Stream::Item");
+        assert_ne!(associated_types[2].id, associated_types[3].id);
+        assert_eq!(
+            associated_types[2].owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Stream"))
+        );
+        assert_eq!(
+            associated_types[3].owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Stream"))
+        );
     }
 }
