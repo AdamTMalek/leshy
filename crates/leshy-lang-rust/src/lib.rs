@@ -682,9 +682,11 @@ type RepositorySymbolOwners = BTreeMap<String, CrateSymbolOwners>;
 
 fn collect_repository_symbol_owners(parsed_files: &[&ParsedFile]) -> RepositorySymbolOwners {
     let mut keys: RepositorySymbolOwners = BTreeMap::new();
+    let mut pending_files = Vec::new();
 
     for parsed_file in parsed_files {
         let Some(crate_scope) = direct_crate_scope(parsed_file) else {
+            pending_files.push(*parsed_file);
             continue;
         };
         let context = ExtractionContext::file(parsed_file, None);
@@ -703,33 +705,42 @@ fn collect_repository_symbol_owners(parsed_files: &[&ParsedFile]) -> RepositoryS
         );
     }
 
-    for parsed_file in parsed_files {
-        if direct_crate_scope(parsed_file).is_some() {
-            continue;
+    while !pending_files.is_empty() {
+        let mut remaining = Vec::new();
+        let mut resolved_in_pass = false;
+
+        for parsed_file in pending_files {
+            let Some(crate_scope) = resolved_crate_scope_for_file(parsed_file, &keys) else {
+                remaining.push(parsed_file);
+                continue;
+            };
+            let crate_keys = keys
+                .get_mut(&crate_scope)
+                .expect("resolved crate scope should exist");
+            let context = ExtractionContext::file(
+                parsed_file,
+                module_owner_for_file(parsed_file, &crate_keys.module_owners),
+            );
+            collect_local_type_keys_into(
+                parsed_file.tree.root_node(),
+                parsed_file,
+                &context,
+                &mut crate_keys.type_owners,
+            );
+            collect_module_owners_into(
+                parsed_file.tree.root_node(),
+                parsed_file,
+                &context,
+                &mut crate_keys.module_owners,
+            );
+            resolved_in_pass = true;
         }
 
-        let Some(crate_scope) = resolved_crate_scope_for_file(parsed_file, &keys) else {
-            continue;
-        };
-        let crate_keys = keys
-            .get_mut(&crate_scope)
-            .expect("resolved crate scope should exist");
-        let context = ExtractionContext::file(
-            parsed_file,
-            module_owner_for_file(parsed_file, &crate_keys.module_owners),
-        );
-        collect_local_type_keys_into(
-            parsed_file.tree.root_node(),
-            parsed_file,
-            &context,
-            &mut crate_keys.type_owners,
-        );
-        collect_module_owners_into(
-            parsed_file.tree.root_node(),
-            parsed_file,
-            &context,
-            &mut crate_keys.module_owners,
-        );
+        if !resolved_in_pass {
+            break;
+        }
+
+        pending_files = remaining;
     }
 
     keys

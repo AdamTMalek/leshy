@@ -855,6 +855,59 @@ mod tests {
     }
 
     #[test]
+    fn resolves_nested_mod_rs_children_even_when_the_child_file_sorts_first() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub mod foo;\n");
+        tempdir.write_file("src/foo/mod.rs", "pub mod bar;\n");
+        tempdir.write_file(
+            "src/foo/bar.rs",
+            "pub struct Widget;\nimpl Widget { fn build() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let foo_mod_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/foo/mod.rs")
+            .expect("foo mod file should be parsed");
+        let bar_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/foo/bar.rs")
+            .expect("bar file should be parsed");
+        let widget = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                bar_file.file_id,
+                "type:foo::bar::Widget",
+            ))
+            .expect("nested module type should exist");
+        let method = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                bar_file.file_id,
+                "method:foo::bar::Widget::build",
+            ))
+            .expect("nested module method should exist");
+
+        assert_eq!(
+            widget.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                foo_mod_file.file_id,
+                "module:foo::bar",
+            ))
+        );
+        assert_eq!(
+            method.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                bar_file.file_id,
+                "type:foo::bar::Widget",
+            ))
+        );
+    }
+
+    #[test]
     fn indexes_dyn_trait_and_nominal_dyn_type_impls_without_key_collisions() {
         let tempdir = TestDir::new();
         tempdir.write_file(
