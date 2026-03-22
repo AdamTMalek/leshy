@@ -908,6 +908,60 @@ mod tests {
     }
 
     #[test]
+    fn prefers_binary_crate_scope_for_nested_module_files_under_src_bin() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub mod helper;\n");
+        tempdir.write_file("src/helper.rs", "pub struct LibHelper;\n");
+        tempdir.write_file("src/bin/tool.rs", "pub mod helper;\n");
+        tempdir.write_file(
+            "src/bin/tool/helper.rs",
+            "pub struct Widget;\nimpl Widget { fn build() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let tool_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/bin/tool.rs")
+            .expect("binary root file should be parsed");
+        let helper_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/bin/tool/helper.rs")
+            .expect("binary helper file should be parsed");
+        let widget = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                helper_file.file_id,
+                "type:helper::Widget",
+            ))
+            .expect("binary helper type should exist");
+        let method = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                helper_file.file_id,
+                "method:helper::Widget::build",
+            ))
+            .expect("binary helper method should exist");
+
+        assert_eq!(
+            widget.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                tool_file.file_id,
+                "module:helper",
+            ))
+        );
+        assert_eq!(
+            method.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                helper_file.file_id,
+                "type:helper::Widget",
+            ))
+        );
+    }
+
+    #[test]
     fn leaves_orphan_src_files_out_of_crate_owner_resolution() {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "pub struct Widget;\n");

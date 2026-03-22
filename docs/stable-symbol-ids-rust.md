@@ -17,10 +17,11 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 5. `src/bin/<name>.rs` defines a binary crate root namespace, not `bin::<name>`.
 6. `src/bin/<name>/main.rs` defines a binary crate root namespace, not `bin::<name>`.
 7. Files under `src/bin/<name>/...` are namespaced relative to that binary crate root.
-8. `src/foo.rs` defines module namespace `foo`.
-9. `src/foo/mod.rs` defines module namespace `foo`.
-10. `src/foo/bar.rs` defines module namespace `foo::bar`.
-11. Inline modules extend the current module namespace from the point where they are defined.
+8. Out-of-line module files under `src/bin/<name>/...` belong to that binary crate scope even when another crate root in the same package exposes the same module path.
+9. `src/foo.rs` defines module namespace `foo`.
+10. `src/foo/mod.rs` defines module namespace `foo`.
+11. `src/foo/bar.rs` defines module namespace `foo::bar`.
+12. Inline modules extend the current module namespace from the point where they are defined.
 
 ## 2. Canonical Rust path spellings
 

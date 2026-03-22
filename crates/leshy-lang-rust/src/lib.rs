@@ -754,6 +754,12 @@ fn resolved_crate_scope_for_file(
         return Some(scope);
     }
 
+    if let Some(scope) = path_anchored_crate_scope(parsed_file)
+        && repository_keys.contains_key(&scope)
+    {
+        return Some(scope);
+    }
+
     let package_prefix = package_prefix(parsed_file);
     let namespace = file_namespace(parsed_file);
     let module_key = (!namespace.is_empty()).then(|| format!("module:{}", namespace.join("::")));
@@ -780,6 +786,33 @@ fn resolved_crate_scope_for_file(
     }
 
     None
+}
+
+fn path_anchored_crate_scope(parsed_file: &ParsedFile) -> Option<String> {
+    let path = parsed_file.relative_path.as_str();
+    let path_segments: Vec<&str> = path.split('/').collect();
+    let src_index = path_segments
+        .iter()
+        .position(|segment| *segment == "src")
+        .unwrap_or(0);
+    let package_prefix = if path_segments.get(src_index) == Some(&"src") {
+        join_layout_segments(&path_segments[..src_index])
+    } else {
+        String::new()
+    };
+    let crate_relative_segments = if path_segments.get(src_index) == Some(&"src") {
+        &path_segments[src_index + 1..]
+    } else {
+        &path_segments[..]
+    };
+
+    match crate_relative_segments {
+        ["bin", binary_name, rest @ ..] if !rest.is_empty() => Some(crate_scope_key(
+            &package_prefix,
+            &format!("bin/{binary_name}"),
+        )),
+        _ => None,
+    }
 }
 
 fn collect_module_owners_into(
