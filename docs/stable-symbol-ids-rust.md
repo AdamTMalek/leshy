@@ -19,12 +19,14 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 7. `build.rs` defines a build-script crate root namespace and crate scope, not `build`.
 8. Files under `src/bin/<name>/...` are namespaced relative to that binary crate root.
 9. Out-of-line module files under `src/bin/<name>/...` belong to that binary crate scope even when another crate root in the same package exposes the same module path.
-10. `src/foo.rs` defines module namespace `foo`.
-11. `src/foo/mod.rs` defines module namespace `foo`.
-12. `src/foo/bar.rs` defines module namespace `foo::bar`.
-13. Inline modules extend the current module namespace from the point where they are defined.
-14. If one Rust source file is reused by multiple crate roots in the same package and Leshy cannot represent multiple semantic owners for that file, owner resolution must choose one crate scope deterministically rather than falling back to file ownership.
-15. The current deterministic preference order for shared module files is `lib`, then `main`, then `build`, then binary crate scopes in lexical order.
+10. Standalone Rust crates under Cargo directories such as `tests/`, `examples/`, and `benches/` define crate root namespaces, not module paths like `tests::foo` or `examples::bar`.
+11. Files under `tests/<name>/...`, `examples/<name>/...`, and `benches/<name>/...` are namespaced relative to that standalone crate root.
+12. `src/foo.rs` defines module namespace `foo`.
+13. `src/foo/mod.rs` defines module namespace `foo`.
+14. `src/foo/bar.rs` defines module namespace `foo::bar`.
+15. Inline modules extend the current module namespace from the point where they are defined.
+16. If one Rust source file is reused by multiple crate roots in the same package and Leshy cannot represent multiple semantic owners for that file, owner resolution must choose one crate scope deterministically rather than falling back to file ownership.
+17. The current deterministic preference order for shared module files is `lib`, then `main`, then `build`, then binary crate scopes in lexical order.
 
 ## 2. Canonical Rust path spellings
 

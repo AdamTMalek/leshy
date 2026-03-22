@@ -1126,6 +1126,40 @@ mod tests {
     }
 
     #[test]
+    fn treats_tests_rs_files_as_crate_roots_not_library_modules() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub mod tests;\n");
+        tempdir.write_file("src/tests.rs", "pub struct LibraryHelper;\n");
+        tempdir.write_file(
+            "tests/sample.rs",
+            "pub struct Widget;\nimpl Widget { fn build() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let test_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "tests/sample.rs")
+            .expect("integration test file should be parsed");
+        let build = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                test_file.file_id,
+                "method:Widget::build",
+            ))
+            .expect("integration test method should exist");
+
+        assert_eq!(
+            build.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                test_file.file_id,
+                "type:Widget",
+            ))
+        );
+    }
+
+    #[test]
     fn leaves_orphan_src_files_out_of_crate_owner_resolution() {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "pub struct Widget;\n");

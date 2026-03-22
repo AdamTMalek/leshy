@@ -850,6 +850,9 @@ fn crate_scope_preference(scope: &str) -> (u8, String) {
 fn path_anchored_crate_scope(parsed_file: &ParsedFile) -> Option<String> {
     let path = parsed_file.relative_path.as_str();
     let path_segments: Vec<&str> = path.split('/').collect();
+    if let Some(scope) = non_src_crate_scope(&path_segments) {
+        return Some(scope);
+    }
     let src_index = path_segments
         .iter()
         .position(|segment| *segment == "src")
@@ -940,6 +943,9 @@ fn direct_crate_scope(parsed_file: &ParsedFile) -> Option<String> {
     if let Some(build_scope) = build_script_scope(&path_segments) {
         return Some(build_scope);
     }
+    if let Some(non_src_scope) = non_src_crate_scope(&path_segments) {
+        return Some(non_src_scope);
+    }
     let src_index = path_segments
         .iter()
         .position(|segment| *segment == "src")
@@ -978,6 +984,9 @@ fn rust_source_layout(parsed_file: &ParsedFile) -> RustSourceLayout {
     let path_segments: Vec<&str> = path.split('/').collect();
     if let Some(build_layout) = build_script_layout(&path_segments) {
         return build_layout;
+    }
+    if let Some(non_src_layout) = non_src_crate_layout(&path_segments) {
+        return non_src_layout;
     }
     let src_index = path_segments
         .iter()
@@ -1020,6 +1029,51 @@ fn build_script_layout(path_segments: &[&str]) -> Option<RustSourceLayout> {
             package_prefix: join_layout_segments(package_prefix),
             namespace: Vec::new(),
         }),
+        _ => None,
+    }
+}
+
+fn non_src_crate_scope(path_segments: &[&str]) -> Option<String> {
+    let (package_prefix, target) = non_src_crate_target(path_segments)?;
+    Some(crate_scope_key(
+        &join_layout_segments(package_prefix),
+        &target,
+    ))
+}
+
+fn non_src_crate_layout(path_segments: &[&str]) -> Option<RustSourceLayout> {
+    let (package_prefix, _target) = non_src_crate_target(path_segments)?;
+    let crate_relative_segments = &path_segments[package_prefix.len()..];
+
+    match crate_relative_segments {
+        [_, file_name] if file_name.ends_with(".rs") => Some(RustSourceLayout {
+            package_prefix: join_layout_segments(package_prefix),
+            namespace: Vec::new(),
+        }),
+        [_, _crate_name, rest @ ..] => Some(RustSourceLayout {
+            package_prefix: join_layout_segments(package_prefix),
+            namespace: module_namespace_from_segments(rest),
+        }),
+        _ => None,
+    }
+}
+
+fn non_src_crate_target<'a>(path_segments: &'a [&'a str]) -> Option<(&'a [&'a str], String)> {
+    let crate_dir_index = path_segments
+        .iter()
+        .position(|segment| matches!(*segment, "tests" | "examples" | "benches"))?;
+    let package_prefix = &path_segments[..crate_dir_index];
+    let crate_relative_segments = &path_segments[crate_dir_index..];
+
+    match crate_relative_segments {
+        [kind, file_name] if file_name.ends_with(".rs") => {
+            let crate_name = file_name.strip_suffix(".rs")?;
+            Some((package_prefix, format!("{kind}/{crate_name}")))
+        }
+        [kind, crate_name, "main.rs"] => Some((package_prefix, format!("{kind}/{crate_name}"))),
+        [kind, crate_name, rest @ ..] if !rest.is_empty() => {
+            Some((package_prefix, format!("{kind}/{crate_name}")))
+        }
         _ => None,
     }
 }
@@ -1560,6 +1614,45 @@ impl crate::Tool {
             main.owner,
             leshy_core::SymbolOwner::File(parsed_file.file_id)
         );
+    }
+
+    #[test]
+    fn treats_tests_examples_and_benches_as_crate_roots() {
+        let source = "pub struct Widget;\nimpl Widget { fn build() -> Self { Self } }\n";
+
+        for path in [
+            "tests/sample.rs",
+            "examples/demo.rs",
+            "benches/benchy.rs",
+            "tests/sample/main.rs",
+        ] {
+            let tree = parse_source(source).expect("parse should succeed");
+            let relative_path = RelativePath::new(path).expect("relative path should build");
+            let parsed_file = ParsedFile {
+                file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+                relative_path,
+                language: LanguageId::new("rust"),
+                source_text: source.to_string(),
+                tree,
+            };
+
+            let symbols = extract_symbols(&parsed_file);
+            let widget = symbols
+                .iter()
+                .find(|symbol| symbol.display_name == "Widget")
+                .expect("type should exist");
+            let build = symbols
+                .iter()
+                .find(|symbol| symbol.display_name == "build")
+                .expect("method should exist");
+
+            assert_eq!(widget.stable_key, "type:Widget");
+            assert_eq!(build.stable_key, "method:Widget::build");
+            assert_eq!(
+                build.owner,
+                leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Widget"))
+            );
+        }
     }
 
     #[test]
