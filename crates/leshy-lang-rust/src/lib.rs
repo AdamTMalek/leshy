@@ -81,6 +81,7 @@ impl LanguagePlugin for RustLanguagePlugin {
         symbols_by_file: &mut BTreeMap<leshy_core::FileId, Vec<ExtractedSymbol>>,
     ) {
         let repository_keys = collect_repository_symbol_owners(parsed_files);
+        let repository_aliases = collect_repository_use_aliases(parsed_files, &repository_keys);
 
         for parsed_file in parsed_files {
             let Some(crate_scope) = resolved_crate_scope_for_file(parsed_file, &repository_keys)
@@ -94,7 +95,10 @@ impl LanguagePlugin for RustLanguagePlugin {
                 parsed_file,
                 module_owner_for_file(parsed_file, &crate_keys.module_owners),
             );
-            let use_aliases = collect_use_aliases(parsed_file, &context);
+            let use_aliases = repository_aliases
+                .get(&crate_scope)
+                .cloned()
+                .unwrap_or_default();
             let symbols = extract_symbols_with_resolution(
                 parsed_file,
                 &context,
@@ -679,6 +683,7 @@ fn split_path_prefix_and_suffix(raw: &str) -> Option<(String, String)> {
 }
 
 type RepositorySymbolOwners = BTreeMap<String, CrateSymbolOwners>;
+type RepositoryUseAliases = BTreeMap<String, UseAliases>;
 
 fn collect_repository_symbol_owners(parsed_files: &[&ParsedFile]) -> RepositorySymbolOwners {
     let mut keys: RepositorySymbolOwners = BTreeMap::new();
@@ -744,6 +749,38 @@ fn collect_repository_symbol_owners(parsed_files: &[&ParsedFile]) -> RepositoryS
     }
 
     keys
+}
+
+fn collect_repository_use_aliases(
+    parsed_files: &[&ParsedFile],
+    repository_keys: &RepositorySymbolOwners,
+) -> RepositoryUseAliases {
+    let mut aliases_by_scope = BTreeMap::new();
+
+    for parsed_file in parsed_files {
+        let Some(crate_scope) = resolved_crate_scope_for_file(parsed_file, repository_keys) else {
+            continue;
+        };
+        let crate_keys = repository_keys
+            .get(&crate_scope)
+            .expect("resolved crate scope should exist");
+        let context = ExtractionContext::file(
+            parsed_file,
+            module_owner_for_file(parsed_file, &crate_keys.module_owners),
+        );
+        merge_use_aliases(
+            aliases_by_scope.entry(crate_scope).or_default(),
+            collect_use_aliases(parsed_file, &context),
+        );
+    }
+
+    aliases_by_scope
+}
+
+fn merge_use_aliases(target: &mut UseAliases, source: UseAliases) {
+    for (scope, aliases) in source {
+        target.entry(scope).or_default().extend(aliases);
+    }
 }
 
 fn resolved_crate_scope_for_file(
@@ -1067,8 +1104,9 @@ fn resolve_imported_path(
     namespace: &[String],
     use_aliases: &UseAliases,
 ) -> Option<String> {
-    let scope = use_aliases.get(&scope_key(namespace))?;
-    let mut resolved = path_prefix.to_string();
+    let (alias_scope, mut resolved) = alias_scope_and_path(path_prefix, namespace)?;
+    let scope = use_aliases.get(&scope_key(&alias_scope))?;
+    let original = resolved.clone();
     let mut seen = std::collections::BTreeSet::new();
 
     loop {
@@ -1080,7 +1118,7 @@ fn resolve_imported_path(
             .split_once("::")
             .map_or((resolved.as_str(), None), |(head, tail)| (head, Some(tail)));
         let Some(target) = scope.get(first) else {
-            return if resolved == path_prefix {
+            return if resolved == original {
                 None
             } else {
                 Some(resolved)
@@ -1092,6 +1130,30 @@ fn resolve_imported_path(
             None => target.clone(),
         };
     }
+}
+
+fn alias_scope_and_path(path_prefix: &str, namespace: &[String]) -> Option<(Vec<String>, String)> {
+    let mut scope = namespace.to_vec();
+    let mut remaining = path_prefix.trim();
+
+    loop {
+        if let Some(rest) = remaining.strip_prefix("self::") {
+            remaining = rest;
+            continue;
+        }
+        if let Some(rest) = remaining.strip_prefix("super::") {
+            scope.pop()?;
+            remaining = rest;
+            continue;
+        }
+        if let Some(rest) = remaining.strip_prefix("crate::") {
+            scope.clear();
+            remaining = rest;
+        }
+        break;
+    }
+
+    (!remaining.is_empty()).then(|| (scope, remaining.to_string()))
 }
 
 fn parse_use_declaration(text: &str, namespace: &[String]) -> Vec<(String, String)> {
@@ -1883,6 +1945,50 @@ impl Assoc for crate::outer::Wrapper<u8> {
         assert_eq!(from_u8.owner, wrapper_owner);
         assert_eq!(kind.owner, wrapper_owner);
         assert_eq!(assoc_item.owner, wrapper_owner);
+    }
+
+    #[test]
+    fn resolves_parent_scope_use_aliases_for_impl_targets() {
+        let source = r#"
+mod outer {
+    use crate::model::Record as Alias;
+
+    mod inner {
+        impl super::Alias {
+            fn from_parent_alias() -> Self {
+                Self
+            }
+        }
+    }
+}
+
+mod model {
+    pub struct Record;
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let method = symbols
+            .iter()
+            .find(|symbol| symbol.stable_key == "method:model::Record::from_parent_alias")
+            .expect("parent-scope alias method should exist");
+
+        assert_eq!(
+            method.owner,
+            leshy_core::SymbolOwner::Symbol(SymbolId::new(
+                parsed_file.file_id,
+                "type:model::Record",
+            ))
+        );
     }
 
     #[test]

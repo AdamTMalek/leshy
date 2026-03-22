@@ -855,6 +855,49 @@ mod tests {
     }
 
     #[test]
+    fn resolves_parent_scope_aliases_for_impl_targets() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "mod outer;\nmod model;\n");
+        tempdir.write_file(
+            "src/outer.rs",
+            "use crate::model::Record as Alias;\npub mod inner;\n",
+        );
+        tempdir.write_file(
+            "src/outer/inner.rs",
+            "impl super::Alias { fn from_parent_alias() -> Self { Self } }\n",
+        );
+        tempdir.write_file("src/model.rs", "pub struct Record;\n");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let inner_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/outer/inner.rs")
+            .expect("inner file should be parsed");
+        let model_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/model.rs")
+            .expect("model file should be parsed");
+        let method = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                inner_file.file_id,
+                "method:model::Record::from_parent_alias",
+            ))
+            .expect("parent-scope alias impl method should exist");
+
+        assert_eq!(
+            method.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                model_file.file_id,
+                "type:model::Record",
+            ))
+        );
+    }
+
+    #[test]
     fn resolves_nested_mod_rs_children_even_when_the_child_file_sorts_first() {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "pub mod foo;\n");
