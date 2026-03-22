@@ -640,6 +640,91 @@ mod tests {
         assert_eq!(from_crate.owner, leshy_core::SymbolOwner::Symbol(record_id));
     }
 
+    #[test]
+    fn keeps_repository_type_resolution_scoped_to_each_crate() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "crates/a/src/lib.rs",
+            "pub struct Record;\nimpl Record { fn new() -> Self { Self } }\n",
+        );
+        tempdir.write_file(
+            "crates/b/src/lib.rs",
+            "pub struct Record;\nimpl Record { fn new() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let crate_a = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "crates/a/src/lib.rs")
+            .expect("crate a file should be parsed");
+        let crate_b = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "crates/b/src/lib.rs")
+            .expect("crate b file should be parsed");
+
+        let new_in_a = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                crate_a.file_id,
+                "method:Record::new",
+            ))
+            .expect("crate a method should exist");
+        let new_in_b = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                crate_b.file_id,
+                "method:Record::new",
+            ))
+            .expect("crate b method should exist");
+
+        assert_eq!(
+            new_in_a.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                crate_a.file_id,
+                "type:Record",
+            ))
+        );
+        assert_eq!(
+            new_in_b.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                crate_b.file_id,
+                "type:Record",
+            ))
+        );
+    }
+
+    #[test]
+    fn treats_src_bin_files_as_crate_roots() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "crates/example/src/bin/tool.rs",
+            "pub struct Tool;\nimpl crate::Tool { fn run() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| {
+                parsed_file.relative_path.as_str() == "crates/example/src/bin/tool.rs"
+            })
+            .expect("binary crate file should be parsed");
+
+        let run = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(file.file_id, "method:Tool::run"))
+            .expect("binary crate method should exist");
+
+        assert_eq!(
+            run.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(file.file_id, "type:Tool"))
+        );
+    }
+
     struct TestDir {
         path: PathBuf,
     }

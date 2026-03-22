@@ -102,6 +102,8 @@ If the rules are intentionally revised in a breaking way, the change must be doc
 2. Cross-file ownership must refer to the owner's true defining symbol ID, not to a same-file surrogate.
 3. Cross-file ownership must not depend on whether the owner file is indexed before or after the child file.
 4. Repository-level resolution must use the repository's semantic module structure, not just per-file local declarations.
+5. Repository-level resolution must preserve the language's own root scope boundaries, such as crate, package, or module-root boundaries.
+6. Two symbols that share the same language-local path text but belong to different root scopes must not collide during owner resolution.
 
 ### 9. Review checklist for any language integration
 

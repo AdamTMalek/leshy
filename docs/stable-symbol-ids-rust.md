@@ -14,10 +14,13 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 2. The module root is the crate's `src/` directory, even when the crate lives inside a workspace path such as `crates/<name>/src/`.
 3. For Rust stable keys, repository path prefixes outside the crate root must never appear in canonical symbol paths.
 4. `src/lib.rs` and `src/main.rs` define the crate root namespace.
-5. `src/foo.rs` defines module namespace `foo`.
-6. `src/foo/mod.rs` defines module namespace `foo`.
-7. `src/foo/bar.rs` defines module namespace `foo::bar`.
-8. Inline modules extend the current module namespace from the point where they are defined.
+5. `src/bin/<name>.rs` defines a binary crate root namespace, not `bin::<name>`.
+6. `src/bin/<name>/main.rs` defines a binary crate root namespace, not `bin::<name>`.
+7. Files under `src/bin/<name>/...` are namespaced relative to that binary crate root.
+8. `src/foo.rs` defines module namespace `foo`.
+9. `src/foo/mod.rs` defines module namespace `foo`.
+10. `src/foo/bar.rs` defines module namespace `foo::bar`.
+11. Inline modules extend the current module namespace from the point where they are defined.
 
 ## 2. Canonical Rust path spellings
 
@@ -26,6 +29,7 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 3. Equivalent local spellings such as `Widget`, `self::Widget`, `crate::outer::Widget`, or `super::Widget` must canonicalize to the same local path when they refer to the same definition.
 4. Imported aliases must canonicalize to the same target path as the imported definition when the alias resolves unambiguously.
 5. External paths may retain their fully qualified language spelling when no local repository definition exists.
+6. Repository-wide local-owner resolution must stay within the current crate scope unless Rust semantics explicitly cross that boundary.
 
 ## 3. Rust `use` rules
 
@@ -48,6 +52,7 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 5. Trait impls that differ by implemented trait, target type, or concrete type arguments must receive distinct stable keys.
 6. If an impl target resolves to a local repository type through an import, module path, or equivalent local spelling, the owner must point to that local type symbol.
 7. Impl ownership must not depend on whether the type definition appears earlier or later in source.
+8. Impl ownership resolution must not bind a symbol in one crate to a type symbol from another crate merely because the crate-local path text matches.
 
 ## 5. Rust associated item rules
 

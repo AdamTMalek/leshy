@@ -85,10 +85,13 @@ impl LanguagePlugin for RustLanguagePlugin {
         for parsed_file in parsed_files {
             let context = ExtractionContext::file(parsed_file);
             let use_aliases = collect_use_aliases(parsed_file, &context);
+            let crate_scope = crate_scope(parsed_file);
             let symbols = extract_symbols_with_resolution(
                 parsed_file,
                 &context,
-                &repository_type_keys,
+                repository_type_keys
+                    .get(&crate_scope)
+                    .expect("crate scope should be collected"),
                 &use_aliases,
             );
             symbols_by_file.insert(parsed_file.file_id, symbols);
@@ -135,6 +138,12 @@ impl ExtractionContext {
             member_kind: MemberKind::TypeLike { stable_owner },
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RustSourceLayout {
+    crate_scope: String,
+    namespace: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -647,16 +656,19 @@ fn split_path_prefix_and_suffix(raw: &str) -> Option<(String, String)> {
     Some((compact, String::new()))
 }
 
-fn collect_repository_type_keys(parsed_files: &[&ParsedFile]) -> TypeOwners {
+type RepositoryTypeOwners = BTreeMap<String, TypeOwners>;
+
+fn collect_repository_type_keys(parsed_files: &[&ParsedFile]) -> RepositoryTypeOwners {
     let mut keys = BTreeMap::new();
 
     for parsed_file in parsed_files {
         let context = ExtractionContext::file(parsed_file);
+        let crate_scope = crate_scope(parsed_file);
         collect_local_type_keys_into(
             parsed_file.tree.root_node(),
             parsed_file,
             &context,
-            &mut keys,
+            keys.entry(crate_scope).or_default(),
         );
     }
 
@@ -664,32 +676,97 @@ fn collect_repository_type_keys(parsed_files: &[&ParsedFile]) -> TypeOwners {
 }
 
 fn file_namespace(parsed_file: &ParsedFile) -> Vec<String> {
+    rust_source_layout(parsed_file).namespace
+}
+
+fn crate_scope(parsed_file: &ParsedFile) -> String {
+    rust_source_layout(parsed_file).crate_scope
+}
+
+fn rust_source_layout(parsed_file: &ParsedFile) -> RustSourceLayout {
     let path = parsed_file.relative_path.as_str();
     let path_segments: Vec<&str> = path.split('/').collect();
-    let crate_relative_segments = path_segments
+    let src_index = path_segments
         .iter()
         .position(|segment| *segment == "src")
-        .map(|index| &path_segments[index + 1..])
-        .unwrap_or(&path_segments);
-    let mut segments: Vec<String> = crate_relative_segments
+        .unwrap_or(0);
+    let crate_prefix = if path_segments.get(src_index) == Some(&"src") {
+        &path_segments[..src_index]
+    } else {
+        &[][..]
+    };
+    let crate_relative_segments = if path_segments.get(src_index) == Some(&"src") {
+        &path_segments[src_index + 1..]
+    } else {
+        &path_segments[..]
+    };
+
+    if let Some(binary_layout) = binary_source_layout(crate_prefix, crate_relative_segments) {
+        return binary_layout;
+    }
+
+    RustSourceLayout {
+        crate_scope: join_layout_segments(crate_prefix),
+        namespace: module_namespace_from_segments(crate_relative_segments),
+    }
+}
+
+fn binary_source_layout(
+    crate_prefix: &[&str],
+    crate_relative_segments: &[&str],
+) -> Option<RustSourceLayout> {
+    if crate_relative_segments.first().copied() != Some("bin") {
+        return None;
+    }
+
+    match crate_relative_segments {
+        ["bin", file_name] if file_name.ends_with(".rs") => {
+            let binary_name = file_name.strip_suffix(".rs")?;
+            Some(RustSourceLayout {
+                crate_scope: join_layout_segments_with_suffix(crate_prefix, &["bin", binary_name]),
+                namespace: Vec::new(),
+            })
+        }
+        ["bin", binary_name, rest @ ..] => Some(RustSourceLayout {
+            crate_scope: join_layout_segments_with_suffix(crate_prefix, &["bin", binary_name]),
+            namespace: module_namespace_from_segments(rest),
+        }),
+        _ => None,
+    }
+}
+
+fn module_namespace_from_segments(segments: &[&str]) -> Vec<String> {
+    let mut namespace: Vec<String> = segments
         .iter()
         .map(|segment| (*segment).to_string())
         .collect();
-
-    let Some(last) = segments.pop() else {
+    let Some(last) = namespace.pop() else {
         return Vec::new();
     };
 
     match last.as_str() {
-        "lib.rs" | "main.rs" => segments,
-        "mod.rs" => segments,
+        "lib.rs" | "main.rs" => namespace,
+        "mod.rs" => namespace,
         _ => {
             if let Some(stem) = last.strip_suffix(".rs") {
-                segments.push(stem.to_string());
+                namespace.push(stem.to_string());
             }
-            segments
+            namespace
         }
     }
+}
+
+fn join_layout_segments(segments: &[&str]) -> String {
+    segments.join("/")
+}
+
+fn join_layout_segments_with_suffix(prefix: &[&str], suffix: &[&str]) -> String {
+    prefix
+        .iter()
+        .chain(suffix.iter())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn starts_with_dyn_keyword(trimmed: &str) -> bool {
@@ -1036,6 +1113,51 @@ impl crate::Record {
             from_crate.owner,
             leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Record"))
         );
+    }
+
+    #[test]
+    fn treats_src_bin_files_as_crate_roots() {
+        let source = r#"
+pub struct Tool;
+
+impl crate::Tool {
+    fn run() -> Self {
+        Self
+    }
+}
+"#;
+
+        for path in [
+            "crates/example/src/bin/tool.rs",
+            "crates/example/src/bin/tool/main.rs",
+        ] {
+            let tree = parse_source(source).expect("parse should succeed");
+            let relative_path = RelativePath::new(path).expect("relative path should build");
+            let parsed_file = ParsedFile {
+                file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+                relative_path,
+                language: LanguageId::new("rust"),
+                source_text: source.to_string(),
+                tree,
+            };
+
+            let symbols = extract_symbols(&parsed_file);
+            let tool = symbols
+                .iter()
+                .find(|symbol| symbol.display_name == "Tool")
+                .expect("type should exist");
+            let run = symbols
+                .iter()
+                .find(|symbol| symbol.display_name == "run")
+                .expect("method should exist");
+
+            assert_eq!(tool.stable_key, "type:Tool");
+            assert_eq!(run.stable_key, "method:Tool::run");
+            assert_eq!(
+                run.owner,
+                leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Tool"))
+            );
+        }
     }
 
     #[test]
