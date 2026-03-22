@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 leshy-core = { path = "../leshy-core" }
 tree-sitter = "0.25.10"
+
+[dev-dependencies]
+tree-sitter-rust = "0.24.0"

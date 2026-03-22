@@ -58,10 +58,11 @@ fn run_index(path: PathBuf) -> Result<String, CliError> {
 
 fn format_index_summary(path: &std::path::Path, index: &RepositoryIndex) -> String {
     format!(
-        "Indexed repository: {}\nDirectories: {}\nFiles: {}",
+        "Indexed repository: {}\nDirectories: {}\nFiles: {}\nSymbols: {}",
         display_path(path),
         index.scan.directories.len(),
-        index.scan.files.len()
+        index.scan.files.len(),
+        index.symbols.len()
     )
 }
 
@@ -216,6 +217,7 @@ mod tests {
         assert!(summary.contains(display_path(&validated).as_ref()));
         assert!(summary.contains("Directories: 2"));
         assert!(summary.contains("Files: 1"));
+        assert!(summary.contains("Symbols: 1"));
     }
 
     #[test]

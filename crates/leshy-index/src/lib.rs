@@ -3,15 +3,19 @@ use std::fmt::{Display, Formatter};
 use std::path::Path;
 
 use leshy_core::{
-    DirectoryId, FileId, GraphError, RepositoryGraph, RepositoryScan, ScanError, scan_repository,
+    DirectoryId, ExtractedSymbol, FileId, GraphError, RepositoryGraph, RepositoryScan, ScanError,
+    scan_repository,
 };
-use leshy_parser::{LanguageRegistry, ParseError, ParsedFile, parse_repository_scan};
+use leshy_parser::{
+    LanguageRegistry, ParseError, ParsedFile, extract_symbols, parse_repository_scan,
+};
 
 /// The end-to-end indexing result for a repository root.
 #[derive(Debug)]
 pub struct RepositoryIndex {
     pub scan: RepositoryScan,
     pub parsed_files: Vec<ParsedFile>,
+    pub symbols: Vec<ExtractedSymbol>,
     pub graph: RepositoryGraph,
 }
 
@@ -71,11 +75,13 @@ pub fn index_repository(
     let scan = scan_repository(root).map_err(|source| IndexError::Scan { source })?;
     let parsed_files = parse_repository_scan(root, &scan, registry)
         .map_err(|source| IndexError::Parse { source })?;
+    let symbols = extract_symbols(&parsed_files, registry);
     let graph = build_graph_from_scan(&scan)?;
 
     Ok(RepositoryIndex {
         scan,
         parsed_files,
+        symbols,
         graph,
     })
 }
@@ -128,7 +134,9 @@ mod tests {
         assert_eq!(index.scan.directories.len(), 3);
         assert_eq!(index.scan.files.len(), 2);
         assert_eq!(index.parsed_files.len(), 2);
+        assert_eq!(index.symbols.len(), 1);
         assert_eq!(index.parsed_files[0].language, LanguageId::new("rust"));
+        assert_eq!(index.symbols[0].display_name, "library");
         assert_eq!(index.graph.directories().count(), 3);
         assert_eq!(index.graph.files().count(), 2);
         assert_eq!(index.graph.relationships().count(), 5);
@@ -213,6 +221,7 @@ mod tests {
             .expect("indexing should succeed");
 
         assert!(index.parsed_files.is_empty());
+        assert!(index.symbols.is_empty());
         assert_eq!(index.scan.files.len(), 1);
         assert_eq!(index.graph.files().count(), 1);
     }

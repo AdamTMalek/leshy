@@ -25,6 +25,7 @@ fn index_command_succeeds_for_valid_directory() {
     output.stdout_contains("Indexed repository:");
     output.stdout_contains("Directories: 2");
     output.stdout_contains("Files: 1");
+    output.stdout_contains("Symbols: 1");
 }
 
 #[test]
@@ -42,6 +43,7 @@ fn index_command_honors_gitignore_rules() {
 
     output.stdout_contains("Directories: 2");
     output.stdout_contains("Files: 2");
+    output.stdout_contains("Symbols: 1");
 }
 
 #[test]
