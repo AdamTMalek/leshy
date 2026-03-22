@@ -822,7 +822,27 @@ fn resolved_crate_scope_for_file(
         return candidates.pop();
     }
 
-    None
+    preferred_crate_scope(candidates)
+}
+
+fn preferred_crate_scope(candidates: Vec<String>) -> Option<String> {
+    candidates
+        .into_iter()
+        .min_by_key(|scope| crate_scope_preference(scope))
+}
+
+fn crate_scope_preference(scope: &str) -> (u8, String) {
+    let target = scope
+        .rsplit_once('#')
+        .map(|(_, target)| target)
+        .unwrap_or(scope);
+    let rank = match target {
+        "lib" => 0,
+        "main" => 1,
+        _ => 2,
+    };
+
+    (rank, target.to_string())
 }
 
 fn path_anchored_crate_scope(parsed_file: &ParsedFile) -> Option<String> {

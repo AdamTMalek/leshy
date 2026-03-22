@@ -22,6 +22,8 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 10. `src/foo/mod.rs` defines module namespace `foo`.
 11. `src/foo/bar.rs` defines module namespace `foo::bar`.
 12. Inline modules extend the current module namespace from the point where they are defined.
+13. If one Rust source file is reused by multiple crate roots in the same package and Leshy cannot represent multiple semantic owners for that file, owner resolution must choose one crate scope deterministically rather than falling back to file ownership.
+14. The current deterministic preference order for shared module files is `lib`, then `main`, then binary crate scopes in lexical order.
 
 ## 2. Canonical Rust path spellings
 

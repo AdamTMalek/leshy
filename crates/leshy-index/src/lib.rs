@@ -1005,6 +1005,59 @@ mod tests {
     }
 
     #[test]
+    fn prefers_lib_scope_for_module_files_shared_by_lib_and_main() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub mod util;\n");
+        tempdir.write_file("src/main.rs", "pub mod util;\n");
+        tempdir.write_file(
+            "src/util.rs",
+            "pub struct Widget;\nimpl Widget { fn build() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let lib_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+            .expect("lib file should be parsed");
+        let util_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/util.rs")
+            .expect("shared util file should be parsed");
+        let widget = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                util_file.file_id,
+                "type:util::Widget",
+            ))
+            .expect("shared util type should exist");
+        let method = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                util_file.file_id,
+                "method:util::Widget::build",
+            ))
+            .expect("shared util method should exist");
+
+        assert_eq!(
+            widget.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "module:util",
+            ))
+        );
+        assert_eq!(
+            method.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                util_file.file_id,
+                "type:util::Widget",
+            ))
+        );
+    }
+
+    #[test]
     fn leaves_orphan_src_files_out_of_crate_owner_resolution() {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "pub struct Widget;\n");
