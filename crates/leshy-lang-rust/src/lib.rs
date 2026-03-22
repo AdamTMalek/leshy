@@ -779,16 +779,6 @@ fn resolved_crate_scope_for_file(
         return candidates.pop();
     }
 
-    let mut package_scopes: Vec<String> = repository_keys
-        .keys()
-        .filter(|scope| scope_matches_package(scope, &package_prefix))
-        .cloned()
-        .collect();
-
-    if package_scopes.len() == 1 {
-        return package_scopes.pop();
-    }
-
     None
 }
 

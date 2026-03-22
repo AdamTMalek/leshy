@@ -908,6 +908,36 @@ mod tests {
     }
 
     #[test]
+    fn leaves_orphan_src_files_out_of_crate_owner_resolution() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "pub struct Widget;\n");
+        tempdir.write_file(
+            "src/orphan.rs",
+            "impl Widget { fn orphaned() -> Self { Self } }\n",
+        );
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let orphan_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/orphan.rs")
+            .expect("orphan file should be parsed");
+        let orphan_method = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                orphan_file.file_id,
+                "method:Widget::orphaned",
+            ))
+            .expect("orphan method should exist");
+
+        assert_eq!(
+            orphan_method.owner,
+            leshy_core::SymbolOwner::File(orphan_file.file_id)
+        );
+    }
+
+    #[test]
     fn indexes_dyn_trait_and_nominal_dyn_type_impls_without_key_collisions() {
         let tempdir = TestDir::new();
         tempdir.write_file(
