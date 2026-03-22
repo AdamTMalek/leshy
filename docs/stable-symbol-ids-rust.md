@@ -16,14 +16,15 @@ These rules apply to Rust extraction, canonicalization, stable-key generation, a
 4. `src/lib.rs` and `src/main.rs` each define a crate root namespace, but they are distinct crate scopes for owner resolution.
 5. `src/bin/<name>.rs` defines a binary crate root namespace, not `bin::<name>`.
 6. `src/bin/<name>/main.rs` defines a binary crate root namespace, not `bin::<name>`.
-7. Files under `src/bin/<name>/...` are namespaced relative to that binary crate root.
-8. Out-of-line module files under `src/bin/<name>/...` belong to that binary crate scope even when another crate root in the same package exposes the same module path.
-9. `src/foo.rs` defines module namespace `foo`.
-10. `src/foo/mod.rs` defines module namespace `foo`.
-11. `src/foo/bar.rs` defines module namespace `foo::bar`.
-12. Inline modules extend the current module namespace from the point where they are defined.
-13. If one Rust source file is reused by multiple crate roots in the same package and Leshy cannot represent multiple semantic owners for that file, owner resolution must choose one crate scope deterministically rather than falling back to file ownership.
-14. The current deterministic preference order for shared module files is `lib`, then `main`, then binary crate scopes in lexical order.
+7. `build.rs` defines a build-script crate root namespace and crate scope, not `build`.
+8. Files under `src/bin/<name>/...` are namespaced relative to that binary crate root.
+9. Out-of-line module files under `src/bin/<name>/...` belong to that binary crate scope even when another crate root in the same package exposes the same module path.
+10. `src/foo.rs` defines module namespace `foo`.
+11. `src/foo/mod.rs` defines module namespace `foo`.
+12. `src/foo/bar.rs` defines module namespace `foo::bar`.
+13. Inline modules extend the current module namespace from the point where they are defined.
+14. If one Rust source file is reused by multiple crate roots in the same package and Leshy cannot represent multiple semantic owners for that file, owner resolution must choose one crate scope deterministically rather than falling back to file ownership.
+15. The current deterministic preference order for shared module files is `lib`, then `main`, then `build`, then binary crate scopes in lexical order.
 
 ## 2. Canonical Rust path spellings
 

@@ -839,7 +839,8 @@ fn crate_scope_preference(scope: &str) -> (u8, String) {
     let rank = match target {
         "lib" => 0,
         "main" => 1,
-        _ => 2,
+        "build" => 2,
+        _ => 3,
     };
 
     (rank, target.to_string())
@@ -935,6 +936,9 @@ fn package_prefix(parsed_file: &ParsedFile) -> String {
 fn direct_crate_scope(parsed_file: &ParsedFile) -> Option<String> {
     let path = parsed_file.relative_path.as_str();
     let path_segments: Vec<&str> = path.split('/').collect();
+    if let Some(build_scope) = build_script_scope(&path_segments) {
+        return Some(build_scope);
+    }
     let src_index = path_segments
         .iter()
         .position(|segment| *segment == "src")
@@ -971,6 +975,9 @@ fn direct_crate_scope(parsed_file: &ParsedFile) -> Option<String> {
 fn rust_source_layout(parsed_file: &ParsedFile) -> RustSourceLayout {
     let path = parsed_file.relative_path.as_str();
     let path_segments: Vec<&str> = path.split('/').collect();
+    if let Some(build_layout) = build_script_layout(&path_segments) {
+        return build_layout;
+    }
     let src_index = path_segments
         .iter()
         .position(|segment| *segment == "src")
@@ -993,6 +1000,26 @@ fn rust_source_layout(parsed_file: &ParsedFile) -> RustSourceLayout {
     RustSourceLayout {
         package_prefix: join_layout_segments(crate_prefix),
         namespace: module_namespace_from_segments(crate_relative_segments),
+    }
+}
+
+fn build_script_scope(path_segments: &[&str]) -> Option<String> {
+    match path_segments {
+        [package_prefix @ .., "build.rs"] => Some(crate_scope_key(
+            &join_layout_segments(package_prefix),
+            "build",
+        )),
+        _ => None,
+    }
+}
+
+fn build_script_layout(path_segments: &[&str]) -> Option<RustSourceLayout> {
+    match path_segments {
+        [package_prefix @ .., "build.rs"] => Some(RustSourceLayout {
+            package_prefix: join_layout_segments(package_prefix),
+            namespace: Vec::new(),
+        }),
+        _ => None,
     }
 }
 
@@ -1487,6 +1514,33 @@ impl crate::Tool {
                 leshy_core::SymbolOwner::Symbol(SymbolId::new(parsed_file.file_id, "type:Tool"))
             );
         }
+    }
+
+    #[test]
+    fn treats_build_rs_as_a_crate_root_namespace() {
+        let source = "fn main() {}\n";
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path =
+            RelativePath::new("crates/example/build.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let main = symbols
+            .iter()
+            .find(|symbol| symbol.display_name == "main")
+            .expect("build script main should exist");
+
+        assert_eq!(main.stable_key, "fn:main");
+        assert_eq!(
+            main.owner,
+            leshy_core::SymbolOwner::File(parsed_file.file_id)
+        );
     }
 
     #[test]

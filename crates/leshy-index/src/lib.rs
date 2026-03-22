@@ -1101,6 +1101,31 @@ mod tests {
     }
 
     #[test]
+    fn treats_build_rs_as_a_separate_crate_root_from_src_build_modules() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("build.rs", "fn main() {}\n");
+        tempdir.write_file("src/lib.rs", "pub mod build;\n");
+        tempdir.write_file("src/build.rs", "pub fn helper() {}\n");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let build_script = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "build.rs")
+            .expect("build script should be parsed");
+        let main = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(build_script.file_id, "fn:main"))
+            .expect("build script main should exist");
+
+        assert_eq!(
+            main.owner,
+            leshy_core::SymbolOwner::File(build_script.file_id)
+        );
+    }
+
+    #[test]
     fn leaves_orphan_src_files_out_of_crate_owner_resolution() {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "pub struct Widget;\n");
