@@ -232,8 +232,9 @@ name = "leshy-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "leshy-core",
+ "leshy-index",
  "leshy-lang-rust",
+ "leshy-parser",
 ]
 
 [[package]]
@@ -241,17 +242,32 @@ name = "leshy-core"
 version = "0.1.0"
 dependencies = [
  "ignore",
- "tree-sitter",
- "tree-sitter-rust",
+]
+
+[[package]]
+name = "leshy-index"
+version = "0.1.0"
+dependencies = [
+ "leshy-core",
+ "leshy-lang-rust",
+ "leshy-parser",
 ]
 
 [[package]]
 name = "leshy-lang-rust"
 version = "0.1.0"
 dependencies = [
- "leshy-core",
+ "leshy-parser",
  "tree-sitter",
  "tree-sitter-rust",
+]
+
+[[package]]
+name = "leshy-parser"
+version = "0.1.0"
+dependencies = [
+ "leshy-core",
+ "tree-sitter",
 ]
 
 [[package]]

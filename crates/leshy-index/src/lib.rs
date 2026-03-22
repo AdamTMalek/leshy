@@ -2,10 +2,10 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 
-use crate::{
-    DirectoryId, FileId, GraphError, LanguagePlugin, ParseError, ParsedFile, RepositoryGraph,
-    RepositoryScan, ScanError, parse_repository_scan, scan_repository,
+use leshy_core::{
+    DirectoryId, FileId, GraphError, RepositoryGraph, RepositoryScan, ScanError, scan_repository,
 };
+use leshy_parser::{LanguageRegistry, ParseError, ParsedFile, parse_repository_scan};
 
 /// The end-to-end indexing result for a repository root.
 #[derive(Debug)]
@@ -63,13 +63,13 @@ impl Error for IndexError {
     }
 }
 
-/// Scans a repository root and populates a repository graph from the scan output.
+/// Scans a repository root, parses supported source files, and populates a repository graph.
 pub fn index_repository(
     root: &Path,
-    plugins: &[&dyn LanguagePlugin],
+    registry: &LanguageRegistry,
 ) -> Result<RepositoryIndex, IndexError> {
     let scan = scan_repository(root).map_err(|source| IndexError::Scan { source })?;
-    let parsed_files = parse_repository_scan(root, &scan, plugins)
+    let parsed_files = parse_repository_scan(root, &scan, registry)
         .map_err(|source| IndexError::Parse { source })?;
     let graph = build_graph_from_scan(&scan)?;
 
@@ -110,28 +110,25 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use tree_sitter::{Parser, Tree};
+    use leshy_lang_rust::RUST_LANGUAGE_PLUGIN;
+    use leshy_parser::{LanguageId, LanguageRegistry, ParseError};
 
     use super::{IndexError, build_graph_from_scan, index_repository};
-    use crate::{
-        DirectoryId, LanguagePlugin, LanguagePluginError, ParseError, RelativePath, ScanError,
-        SourceLanguage,
-    };
-
-    static TEST_LANGUAGE_PLUGIN: TestLanguagePlugin = TestLanguagePlugin;
+    use leshy_core::{DirectoryId, RelativePath, ScanError};
 
     #[test]
     fn indexes_repository_end_to_end() {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
         tempdir.write_file("src/bin/app.rs", "");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
 
-        let index = index_repository(tempdir.path(), &[&TEST_LANGUAGE_PLUGIN])
-            .expect("indexing should succeed");
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
 
         assert_eq!(index.scan.directories.len(), 3);
         assert_eq!(index.scan.files.len(), 2);
         assert_eq!(index.parsed_files.len(), 2);
+        assert_eq!(index.parsed_files[0].language, LanguageId::new("rust"));
         assert_eq!(index.graph.directories().count(), 3);
         assert_eq!(index.graph.files().count(), 2);
         assert_eq!(index.graph.relationships().count(), 5);
@@ -141,8 +138,8 @@ mod tests {
     #[test]
     fn wraps_scan_failures() {
         let missing_path = unique_temp_path("missing");
-        let error = index_repository(&missing_path, &[&TEST_LANGUAGE_PLUGIN])
-            .expect_err("indexing should fail");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+        let error = index_repository(&missing_path, &registry).expect_err("indexing should fail");
 
         assert!(matches!(
             error,
@@ -156,9 +153,9 @@ mod tests {
     fn wraps_parse_failures() {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "fn broken( {\n");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
 
-        let error = index_repository(tempdir.path(), &[&TEST_LANGUAGE_PLUGIN])
-            .expect_err("indexing should fail");
+        let error = index_repository(tempdir.path(), &registry).expect_err("indexing should fail");
 
         assert!(matches!(
             error,
@@ -175,7 +172,7 @@ mod tests {
         let tempdir = TestDir::new();
         fs::create_dir_all(tempdir.path().join("src/nested")).expect("nested directories");
 
-        let mut scan = crate::scan_repository(tempdir.path()).expect("scan should succeed");
+        let mut scan = leshy_core::scan_repository(tempdir.path()).expect("scan should succeed");
         scan.directories[1].parent_id = None;
         let failing_directory_id = scan.directories[1].id;
 
@@ -192,7 +189,7 @@ mod tests {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "");
 
-        let mut scan = crate::scan_repository(tempdir.path()).expect("scan should succeed");
+        let mut scan = leshy_core::scan_repository(tempdir.path()).expect("scan should succeed");
         scan.files[0].parent_id = DirectoryId::new(
             scan.repository.id,
             &RelativePath::new("missing").expect("relative path should build"),
@@ -212,38 +209,12 @@ mod tests {
         let tempdir = TestDir::new();
         tempdir.write_file("src/lib.rs", "pub fn library() {}\n");
 
-        let index = index_repository(tempdir.path(), &[]).expect("indexing should succeed");
+        let index = index_repository(tempdir.path(), &LanguageRegistry::new())
+            .expect("indexing should succeed");
 
         assert!(index.parsed_files.is_empty());
         assert_eq!(index.scan.files.len(), 1);
         assert_eq!(index.graph.files().count(), 1);
-    }
-
-    struct TestLanguagePlugin;
-
-    impl LanguagePlugin for TestLanguagePlugin {
-        fn language(&self) -> SourceLanguage {
-            SourceLanguage::Rust
-        }
-
-        fn supports_path(&self, path: &Path) -> bool {
-            matches!(
-                path.extension().and_then(std::ffi::OsStr::to_str),
-                Some("rs")
-            )
-        }
-
-        fn parse_source(&self, source_text: &str) -> Result<Tree, LanguagePluginError> {
-            let mut parser = Parser::new();
-            let language = tree_sitter_rust::LANGUAGE.into();
-            parser
-                .set_language(&language)
-                .map_err(|source| LanguagePluginError::ConfigureParser { source })?;
-
-            parser
-                .parse(source_text, None)
-                .ok_or(LanguagePluginError::ParseReturnedNone)
-        }
     }
 
     struct TestDir {

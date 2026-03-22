@@ -1,0 +1,11 @@
+[package]
+name = "leshy-index"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leshy-core = { path = "../leshy-core" }
+leshy-parser = { path = "../leshy-parser" }
+
+[dev-dependencies]
+leshy-lang-rust = { path = "../leshy-lang-rust" }
