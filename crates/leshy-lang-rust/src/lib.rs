@@ -30,7 +30,7 @@ pub fn parse_source(source_text: &str) -> Result<Tree, LanguagePluginError> {
 }
 
 pub fn extract_symbols(parsed_file: &ParsedFile) -> Vec<ExtractedSymbol> {
-    let context = ExtractionContext::file(parsed_file);
+    let context = ExtractionContext::file(parsed_file, None);
     let use_aliases = collect_use_aliases(parsed_file, &context);
     extract_symbols_with_resolution(
         parsed_file,
@@ -80,18 +80,22 @@ impl LanguagePlugin for RustLanguagePlugin {
         parsed_files: &[&ParsedFile],
         symbols_by_file: &mut BTreeMap<leshy_core::FileId, Vec<ExtractedSymbol>>,
     ) {
-        let repository_type_keys = collect_repository_type_keys(parsed_files);
+        let repository_keys = collect_repository_symbol_owners(parsed_files);
 
         for parsed_file in parsed_files {
-            let context = ExtractionContext::file(parsed_file);
-            let use_aliases = collect_use_aliases(parsed_file, &context);
             let crate_scope = crate_scope(parsed_file);
+            let crate_keys = repository_keys
+                .get(&crate_scope)
+                .expect("crate scope should be collected");
+            let context = ExtractionContext::file(
+                parsed_file,
+                module_owner_for_file(parsed_file, &crate_keys.module_owners),
+            );
+            let use_aliases = collect_use_aliases(parsed_file, &context);
             let symbols = extract_symbols_with_resolution(
                 parsed_file,
                 &context,
-                repository_type_keys
-                    .get(&crate_scope)
-                    .expect("crate scope should be collected"),
+                &crate_keys.type_owners,
                 &use_aliases,
             );
             symbols_by_file.insert(parsed_file.file_id, symbols);
@@ -107,10 +111,10 @@ struct ExtractionContext {
 }
 
 impl ExtractionContext {
-    fn file(parsed_file: &ParsedFile) -> Self {
+    fn file(parsed_file: &ParsedFile, owner: Option<leshy_core::SymbolId>) -> Self {
         Self {
             namespace: file_namespace(parsed_file),
-            owner: NestingOwner::File,
+            owner: owner.map_or(NestingOwner::File, NestingOwner::Symbol),
             member_kind: MemberKind::FileLike,
         }
     }
@@ -144,6 +148,12 @@ impl ExtractionContext {
 struct RustSourceLayout {
     crate_scope: String,
     namespace: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CrateSymbolOwners {
+    type_owners: TypeOwners,
+    module_owners: ModuleOwners,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -490,6 +500,7 @@ fn owner(context: &ExtractionContext, file_id: leshy_core::FileId) -> SymbolOwne
 }
 
 type TypeOwners = BTreeMap<String, leshy_core::SymbolId>;
+type ModuleOwners = BTreeMap<String, leshy_core::SymbolId>;
 type UseAliases = BTreeMap<String, BTreeMap<String, String>>;
 
 fn compact_type_name(raw: &str) -> String {
@@ -656,23 +667,82 @@ fn split_path_prefix_and_suffix(raw: &str) -> Option<(String, String)> {
     Some((compact, String::new()))
 }
 
-type RepositoryTypeOwners = BTreeMap<String, TypeOwners>;
+type RepositorySymbolOwners = BTreeMap<String, CrateSymbolOwners>;
 
-fn collect_repository_type_keys(parsed_files: &[&ParsedFile]) -> RepositoryTypeOwners {
-    let mut keys = BTreeMap::new();
+fn collect_repository_symbol_owners(parsed_files: &[&ParsedFile]) -> RepositorySymbolOwners {
+    let mut keys: RepositorySymbolOwners = BTreeMap::new();
 
     for parsed_file in parsed_files {
-        let context = ExtractionContext::file(parsed_file);
+        let context = ExtractionContext::file(parsed_file, None);
         let crate_scope = crate_scope(parsed_file);
+        let crate_keys = keys.entry(crate_scope).or_default();
         collect_local_type_keys_into(
             parsed_file.tree.root_node(),
             parsed_file,
             &context,
-            keys.entry(crate_scope).or_default(),
+            &mut crate_keys.type_owners,
+        );
+        collect_module_owners_into(
+            parsed_file.tree.root_node(),
+            parsed_file,
+            &context,
+            &mut crate_keys.module_owners,
         );
     }
 
     keys
+}
+
+fn collect_module_owners_into(
+    node: Node<'_>,
+    parsed_file: &ParsedFile,
+    context: &ExtractionContext,
+    keys: &mut ModuleOwners,
+) {
+    let mut cursor = node.walk();
+
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "mod_item" {
+            continue;
+        }
+
+        let Some(name) = node_name(child, parsed_file) else {
+            continue;
+        };
+
+        let module_path = join_path(namespace(context), &name);
+        let stable_key = format!("module:{module_path}");
+        keys.insert(
+            stable_key.clone(),
+            leshy_core::SymbolId::new(parsed_file.file_id, &stable_key),
+        );
+
+        if let Some(body) = child.child_by_field_name("body") {
+            collect_module_owners_into(
+                body,
+                parsed_file,
+                &context.module(
+                    leshy_core::SymbolId::new(parsed_file.file_id, &stable_key),
+                    &name,
+                ),
+                keys,
+            );
+        }
+    }
+}
+
+fn module_owner_for_file(
+    parsed_file: &ParsedFile,
+    module_owners: &ModuleOwners,
+) -> Option<leshy_core::SymbolId> {
+    let namespace = file_namespace(parsed_file);
+    if namespace.is_empty() {
+        return None;
+    }
+
+    module_owners
+        .get(&format!("module:{}", namespace.join("::")))
+        .copied()
 }
 
 fn file_namespace(parsed_file: &ParsedFile) -> Vec<String> {
@@ -835,16 +905,31 @@ fn resolve_imported_path(
     namespace: &[String],
     use_aliases: &UseAliases,
 ) -> Option<String> {
-    let (first, remainder) = path_prefix
-        .split_once("::")
-        .map_or((path_prefix, None), |(head, tail)| (head, Some(tail)));
     let scope = use_aliases.get(&scope_key(namespace))?;
-    let target = scope.get(first)?;
+    let mut resolved = path_prefix.to_string();
+    let mut seen = std::collections::BTreeSet::new();
 
-    Some(match remainder {
-        Some(rest) => format!("{target}::{rest}"),
-        None => target.clone(),
-    })
+    loop {
+        if !seen.insert(resolved.clone()) {
+            return Some(resolved);
+        }
+
+        let (first, remainder) = resolved
+            .split_once("::")
+            .map_or((resolved.as_str(), None), |(head, tail)| (head, Some(tail)));
+        let Some(target) = scope.get(first) else {
+            return if resolved == path_prefix {
+                None
+            } else {
+                Some(resolved)
+            };
+        };
+
+        resolved = match remainder {
+            Some(rest) => format!("{target}::{rest}"),
+            None => target.clone(),
+        };
+    }
 }
 
 fn parse_use_declaration(text: &str, namespace: &[String]) -> Vec<(String, String)> {

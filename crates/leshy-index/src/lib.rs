@@ -725,6 +725,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn owns_out_of_line_module_items_by_the_module_symbol() {
+        let tempdir = TestDir::new();
+        tempdir.write_file("src/lib.rs", "mod nested;\n");
+        tempdir.write_file("src/nested.rs", "pub fn helper() {}\n");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let lib_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+            .expect("lib file should be parsed");
+        let helper = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                index
+                    .parsed_files
+                    .iter()
+                    .find(|parsed_file| parsed_file.relative_path.as_str() == "src/nested.rs")
+                    .expect("nested file should be parsed")
+                    .file_id,
+                "fn:nested::helper",
+            ))
+            .expect("module file function should exist");
+
+        assert_eq!(
+            helper.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "module:nested",
+            ))
+        );
+    }
+
+    #[test]
+    fn resolves_transitive_import_aliases_for_impl_targets() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "mod outer;\nuse crate::outer as o;\nuse o::Widget as W;\nimpl W { fn from_alias_chain() -> Self { Self } }\n",
+        );
+        tempdir.write_file("src/outer.rs", "pub struct Widget;\n");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let lib_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+            .expect("lib file should be parsed");
+        let outer_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/outer.rs")
+            .expect("outer file should be parsed");
+        let method = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "method:outer::Widget::from_alias_chain",
+            ))
+            .expect("transitively aliased impl method should exist");
+
+        assert_eq!(
+            method.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                outer_file.file_id,
+                "type:outer::Widget",
+            ))
+        );
+    }
+
     struct TestDir {
         path: PathBuf,
     }

@@ -222,6 +222,66 @@ fn resolves_pub_use_reexports_and_grouped_self_aliases() {
     );
 }
 
+#[test]
+fn owns_out_of_line_module_items_by_the_module_symbol() {
+    let tempdir = TestDir::new();
+    tempdir.write_file("src/lib.rs", "mod nested;\n");
+    tempdir.write_file("src/nested.rs", "pub fn helper() {}\n");
+
+    let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+    let scan = scan_repository(tempdir.path()).expect("crate should scan");
+    let parsed_files =
+        parse_repository_scan(tempdir.path(), &scan, &registry).expect("crate should parse");
+    let symbols = extract_symbols(&parsed_files, &registry);
+    let lib_file = parsed_files
+        .iter()
+        .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+        .expect("lib file should be parsed");
+
+    let helper = symbols
+        .iter()
+        .find(|symbol| symbol.stable_key == "fn:nested::helper")
+        .expect("module file function should exist");
+
+    assert_eq!(
+        helper.owner,
+        SymbolOwner::Symbol(leshy_core::SymbolId::new(lib_file.file_id, "module:nested",))
+    );
+}
+
+#[test]
+fn resolves_transitive_import_aliases_for_impl_targets() {
+    let tempdir = TestDir::new();
+    tempdir.write_file(
+        "src/lib.rs",
+        "mod outer;\nuse crate::outer as o;\nuse o::Widget as W;\nimpl W { fn from_alias_chain() -> Self { Self } }\n",
+    );
+    tempdir.write_file("src/outer.rs", "pub struct Widget;\n");
+
+    let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+    let scan = scan_repository(tempdir.path()).expect("crate should scan");
+    let parsed_files =
+        parse_repository_scan(tempdir.path(), &scan, &registry).expect("crate should parse");
+    let symbols = extract_symbols(&parsed_files, &registry);
+    let outer_file = parsed_files
+        .iter()
+        .find(|parsed_file| parsed_file.relative_path.as_str() == "src/outer.rs")
+        .expect("outer file should be parsed");
+
+    let method = symbols
+        .iter()
+        .find(|symbol| symbol.stable_key == "method:outer::Widget::from_alias_chain")
+        .expect("transitively aliased impl method should exist");
+
+    assert_eq!(
+        method.owner,
+        SymbolOwner::Symbol(leshy_core::SymbolId::new(
+            outer_file.file_id,
+            "type:outer::Widget",
+        ))
+    );
+}
+
 fn assert_symbols_for_path(symbols: &[leshy_core::ExtractedSymbol], case: FixtureCase<'_>) {
     let extracted: Vec<(String, SymbolKind, String)> = symbols
         .iter()
