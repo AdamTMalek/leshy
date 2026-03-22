@@ -750,7 +750,7 @@ fn resolve_imported_path(
 }
 
 fn parse_use_declaration(text: &str, namespace: &[String]) -> Vec<(String, String)> {
-    let mut declaration = text.trim();
+    let mut declaration = strip_use_visibility(text.trim());
     declaration = declaration
         .strip_prefix("use")
         .unwrap_or(declaration)
@@ -782,7 +782,11 @@ fn expand_use_tree(
     }
 
     let (path, alias_override) = split_use_alias(tree);
-    let full_path = join_use_prefix(prefix, path);
+    let full_path = if path == "self" {
+        prefix.to_string()
+    } else {
+        join_use_prefix(prefix, path)
+    };
     let canonical_target = canonicalize_use_target(&full_path, namespace);
 
     if canonical_target.is_empty() {
@@ -802,6 +806,32 @@ fn expand_use_tree(
     });
 
     aliases.push((alias, canonical_target));
+}
+
+fn strip_use_visibility(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("pub") else {
+        return text;
+    };
+    let rest = rest.trim_start();
+
+    if let Some(remainder) = rest.strip_prefix('(') {
+        let mut depth = 1usize;
+        for (index, ch) in remainder.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return remainder[index + 1..].trim_start();
+                    }
+                }
+                _ => {}
+            }
+        }
+        text
+    } else {
+        rest
+    }
 }
 
 fn split_use_group(tree: &str) -> Option<(&str, &str)> {
@@ -901,7 +931,7 @@ mod tests {
     use leshy_core::{FileId, RelativePath, RepositoryId, SymbolId, SymbolKind};
     use leshy_parser::{LanguageId, ParsedFile};
 
-    use super::{extract_symbols, parse_source, supports_path};
+    use super::{extract_symbols, parse_source, parse_use_declaration, supports_path};
 
     #[test]
     fn matches_rust_source_files() {
@@ -922,6 +952,29 @@ mod tests {
         let tree = parse_source("fn broken( {\n").expect("parse should still return a tree");
 
         assert!(tree.root_node().has_error());
+    }
+
+    #[test]
+    fn strips_visibility_from_use_declarations() {
+        assert_eq!(
+            parse_use_declaration("pub use crate::model::Record;", &[]),
+            vec![("Record".to_string(), "model::Record".to_string())]
+        );
+        assert_eq!(
+            parse_use_declaration("pub(crate) use crate::model::Record;", &[]),
+            vec![("Record".to_string(), "model::Record".to_string())]
+        );
+    }
+
+    #[test]
+    fn canonicalizes_grouped_self_import_aliases() {
+        assert_eq!(
+            parse_use_declaration("use crate::outer::{self as outer_mod, Widget};", &[]),
+            vec![
+                ("outer_mod".to_string(), "outer".to_string()),
+                ("Widget".to_string(), "outer::Widget".to_string()),
+            ]
+        );
     }
 
     #[test]

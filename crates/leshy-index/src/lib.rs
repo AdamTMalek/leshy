@@ -553,6 +553,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolves_pub_use_reexports_and_grouped_self_aliases() {
+        let tempdir = TestDir::new();
+        tempdir.write_file(
+            "src/lib.rs",
+            "mod model;\nmod outer;\npub use crate::model::Record;\nuse crate::outer::{self as outer_mod};\nimpl Record { fn from_reexport() -> Self { Self } }\nimpl outer_mod::Widget { fn from_alias() -> Self { Self } }\n",
+        );
+        tempdir.write_file("src/model.rs", "pub struct Record;\n");
+        tempdir.write_file("src/outer.rs", "pub struct Widget;\n");
+        let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+
+        let index = index_repository(tempdir.path(), &registry).expect("indexing should succeed");
+        let lib_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/lib.rs")
+            .expect("lib file should be parsed");
+        let model_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/model.rs")
+            .expect("model file should be parsed");
+        let outer_file = index
+            .parsed_files
+            .iter()
+            .find(|parsed_file| parsed_file.relative_path.as_str() == "src/outer.rs")
+            .expect("outer file should be parsed");
+
+        let from_reexport = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "method:model::Record::from_reexport",
+            ))
+            .expect("pub use method should exist");
+        let from_alias = index
+            .graph
+            .symbol(leshy_core::SymbolId::new(
+                lib_file.file_id,
+                "method:outer::Widget::from_alias",
+            ))
+            .expect("grouped self alias method should exist");
+
+        assert_eq!(
+            from_reexport.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                model_file.file_id,
+                "type:model::Record",
+            ))
+        );
+        assert_eq!(
+            from_alias.owner,
+            leshy_core::SymbolOwner::Symbol(leshy_core::SymbolId::new(
+                outer_file.file_id,
+                "type:outer::Widget",
+            ))
+        );
+    }
+
     struct TestDir {
         path: PathBuf,
     }

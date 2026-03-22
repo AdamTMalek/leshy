@@ -173,6 +173,55 @@ fn resolves_cross_file_impl_targets_and_imported_type_names() {
     assert_eq!(from_import.owner, owner);
 }
 
+#[test]
+fn resolves_pub_use_reexports_and_grouped_self_aliases() {
+    let tempdir = TestDir::new();
+    tempdir.write_file(
+        "src/lib.rs",
+        "mod model;\nmod outer;\npub use crate::model::Record;\nuse crate::outer::{self as outer_mod};\nimpl Record { fn from_reexport() -> Self { Self } }\nimpl outer_mod::Widget { fn from_alias() -> Self { Self } }\n",
+    );
+    tempdir.write_file("src/model.rs", "pub struct Record;\n");
+    tempdir.write_file("src/outer.rs", "pub struct Widget;\n");
+
+    let registry = LanguageRegistry::new().with_plugin(&RUST_LANGUAGE_PLUGIN);
+    let scan = scan_repository(tempdir.path()).expect("crate should scan");
+    let parsed_files =
+        parse_repository_scan(tempdir.path(), &scan, &registry).expect("crate should parse");
+    let symbols = extract_symbols(&parsed_files, &registry);
+    let model_file = parsed_files
+        .iter()
+        .find(|parsed_file| parsed_file.relative_path.as_str() == "src/model.rs")
+        .expect("model file should be parsed");
+    let outer_file = parsed_files
+        .iter()
+        .find(|parsed_file| parsed_file.relative_path.as_str() == "src/outer.rs")
+        .expect("outer file should be parsed");
+
+    let from_reexport = symbols
+        .iter()
+        .find(|symbol| symbol.stable_key == "method:model::Record::from_reexport")
+        .expect("pub use impl method should exist");
+    let from_alias = symbols
+        .iter()
+        .find(|symbol| symbol.stable_key == "method:outer::Widget::from_alias")
+        .expect("grouped self alias impl method should exist");
+
+    assert_eq!(
+        from_reexport.owner,
+        SymbolOwner::Symbol(leshy_core::SymbolId::new(
+            model_file.file_id,
+            "type:model::Record",
+        ))
+    );
+    assert_eq!(
+        from_alias.owner,
+        SymbolOwner::Symbol(leshy_core::SymbolId::new(
+            outer_file.file_id,
+            "type:outer::Widget",
+        ))
+    );
+}
+
 fn assert_symbols_for_path(symbols: &[leshy_core::ExtractedSymbol], case: FixtureCase<'_>) {
     let extracted: Vec<(String, SymbolKind, String)> = symbols
         .iter()
