@@ -534,7 +534,8 @@ fn canonicalize_type_like_target(
     };
 
     let resolved_path =
-        resolve_imported_path(&path_prefix, namespace, use_aliases).unwrap_or(path_prefix);
+        resolve_imported_path(&path_prefix, namespace, use_aliases, local_type_keys)
+            .unwrap_or(path_prefix);
     let resolved = resolve_local_path(&resolved_path, namespace, local_type_keys);
     let stable_prefix = resolved.stable_prefix.unwrap_or(resolved_path);
 
@@ -1150,6 +1151,7 @@ fn resolve_imported_path(
     path_prefix: &str,
     namespace: &[String],
     use_aliases: &UseAliases,
+    local_type_keys: &TypeOwners,
 ) -> Option<String> {
     let (alias_scope, mut resolved) = alias_scope_and_path(path_prefix, namespace)?;
     let scope = use_aliases.get(&scope_key(&alias_scope))?;
@@ -1171,10 +1173,11 @@ fn resolve_imported_path(
                 Some(resolved)
             };
         };
+        let qualified_target = qualify_alias_target(target, &alias_scope, local_type_keys);
 
         resolved = match remainder {
-            Some(rest) => format!("{target}::{rest}"),
-            None => target.clone(),
+            Some(rest) => format!("{qualified_target}::{rest}"),
+            None => qualified_target,
         };
     }
 }
@@ -1374,7 +1377,23 @@ fn canonicalize_use_target(path: &str, namespace: &[String]) -> String {
     } else if compact == "self" {
         namespace.join("::")
     } else {
-        join_path(namespace, &path_prefix)
+        path_prefix
+    }
+}
+
+fn qualify_alias_target(
+    target: &str,
+    alias_scope: &[String],
+    local_type_keys: &TypeOwners,
+) -> String {
+    let Some((path_prefix, suffix)) = split_path_prefix_and_suffix(target) else {
+        return target.to_string();
+    };
+    let resolved = resolve_local_path(&path_prefix, alias_scope, local_type_keys);
+
+    match resolved.stable_prefix {
+        Some(prefix) => format!("{prefix}{suffix}"),
+        None => target.to_string(),
     }
 }
 
@@ -2107,6 +2126,38 @@ mod outer {
                 "type:outer::model::Record",
             ))
         );
+    }
+
+    #[test]
+    fn keeps_external_use_aliases_unqualified() {
+        let source = r#"
+use std::fmt::Display;
+
+struct RecordId;
+
+impl Display for RecordId {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
+    }
+}
+"#;
+        let tree = parse_source(source).expect("parse should succeed");
+        let relative_path = RelativePath::new("src/lib.rs").expect("relative path should build");
+        let parsed_file = ParsedFile {
+            file_id: FileId::new(RepositoryId::new("repository"), &relative_path),
+            relative_path,
+            language: LanguageId::new("rust"),
+            source_text: source.to_string(),
+            tree,
+        };
+
+        let symbols = extract_symbols(&parsed_file);
+        let fmt = symbols
+            .iter()
+            .find(|symbol| symbol.display_name == "fmt")
+            .expect("fmt method should exist");
+
+        assert_eq!(fmt.stable_key, "method:std::fmt::Display for RecordId::fmt");
     }
 
     #[test]
